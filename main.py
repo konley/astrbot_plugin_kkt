@@ -90,6 +90,34 @@ class KktImagePlugin(Star):
             if re.fullmatch(r"\d+", group_id.strip())
         }
 
+    @staticmethod
+    def _extract_prompt(event: AstrMessageEvent, prompt: str) -> str:
+        """Recover text after the command when AstrBot parsed an At as an argument."""
+        prompt = (prompt or "").strip()
+        if prompt and not prompt.startswith("@"):
+            return prompt
+
+        plain_text = "".join(
+            getattr(component, "text", "")
+            for component in event.get_messages()
+            if isinstance(component, Comp.Plain)
+        ).strip()
+        match = re.match(
+            r"^/?(?:hajimi|kkt)(?:帮助|help|\\?)?\\s*(.*)$",
+            plain_text,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).strip()
+
+        raw = (event.get_message_str() or "").strip()
+        match = re.match(
+            r"^/?(?:hajimi|kkt)(?:帮助|help|\\?)?\\s*(.*)$",
+            raw,
+            re.IGNORECASE,
+        )
+        return match.group(1).strip() if match else prompt
+
     @filter.command("hajimi", alias={"kkt"})
     async def handle_command(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
         group_id = str(event.get_group_id() or "").strip()
@@ -97,7 +125,7 @@ class KktImagePlugin(Star):
             logger.debug("[kkt] 忽略黑名单群消息: group_id=%s", group_id)
             return
 
-        prompt = prompt.strip()
+        prompt = self._extract_prompt(event, prompt)
         logger.info(
             "[kkt] 指令匹配: command=%s prompt=%r",
             event.get_message_str().split()[0] if event.get_message_str().split() else "",
