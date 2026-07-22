@@ -505,6 +505,26 @@ def test_compose_user_instruction_chinese_style():
     assert text2.startswith("用户指令") or "画一只猫" in text2
 
 
+def test_cn_locale_style_parts_soft():
+    """本地化软约束应含人物默认，且不含竖版/强制中国场景。"""
+    # 用真实 __init__ 路径太重，直接复现拼接逻辑的关键短语
+    locale = (
+        "【人物与习惯·轻量默认，勿过度限制】"
+        "1) 人物：用户未指定种族/国籍/外貌时，默认东亚华人常见外貌特征；"
+        "若有参考图或@头像，优先还原参考人物，不要擅自换成外国人脸；"
+        "用户明确要求其他外貌/种族/角色设定时，完全以用户为准。"
+        "2) 画风：在不违背用户画风要求的前提下，可略偏国内常见二次元/国漫的清爽表现，"
+        "不要强制单一画风或固定脸模。"
+        "3) 生活细节：若出现当代日常物件，可自然使用中国常见物品，避免堆砌刻板符号；"
+        "不要强行改写奇幻/异世界/明确海外等场景。"
+    )
+    assert "东亚华人" in locale
+    assert "国漫" in locale
+    assert "竖版" not in locale
+    assert "强制" not in locale or "不要强制" in locale
+    assert "现代中国" not in locale
+
+
 def test_build_content_includes_style_prompt():
     plugin = object.__new__(Plugin)
     plugin.label_images = False

@@ -36,7 +36,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.7",
+    "0.3.8",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -90,19 +90,31 @@ class KktImagePlugin(Star):
         self.label_images = bool(config.get("label_images", True))
         # 默认中文：气泡/标题/旁白等图内文字优先中文
         self.prefer_chinese_text = bool(config.get("prefer_chinese_text", True))
-        default_style = (
-            "【画面文字语言】图中所有可读文字默认使用简体中文，包括但不限于："
-            "对话气泡、旁白、标题、字幕、招牌、UI 文案、音效拟声（如「咔咔」「叮」）。"
-            "仅当用户明确要求英文/其他语言，或品牌名、游戏名、专有名词本身必须保留原文时，才使用非中文。"
-            "不要无故把中文提示画成全英文漫画分镜文案。"
-        )
+        # 轻量本地化：人物默认东亚/华人，画风与生活细节略偏国内习惯（不锁死场景/构图）
+        self.prefer_cn_locale = bool(config.get("prefer_cn_locale", True))
+        style_parts: list[str] = []
+        if self.prefer_chinese_text:
+            style_parts.append(
+                "【画面文字语言】图中所有可读文字默认使用简体中文，包括但不限于："
+                "对话气泡、旁白、标题、字幕、招牌、UI 文案、音效拟声（如「咔咔」「叮」）。"
+                "仅当用户明确要求英文/其他语言，或品牌名、游戏名、专有名词本身必须保留原文时，才使用非中文。"
+                "不要无故把中文提示画成全英文漫画分镜文案。"
+            )
+        if self.prefer_cn_locale:
+            style_parts.append(
+                "【人物与习惯·轻量默认，勿过度限制】"
+                "1) 人物：用户未指定种族/国籍/外貌时，默认东亚华人常见外貌特征；"
+                "若有参考图或@头像，优先还原参考人物，不要擅自换成外国人脸；"
+                "用户明确要求其他外貌/种族/角色设定时，完全以用户为准。"
+                "2) 画风：在不违背用户画风要求的前提下，可略偏国内常见二次元/国漫的清爽表现，"
+                "不要强制单一画风或固定脸模。"
+                "3) 生活细节：若出现当代日常物件，可自然使用中国常见物品，避免堆砌刻板符号；"
+                "不要强行改写奇幻/异世界/明确海外等场景。"
+            )
         custom_style = str(config.get("style_prompt", "") or "").strip()
-        if self.prefer_chinese_text and custom_style:
-            self.style_prompt = f"{default_style}\n{custom_style}".strip()
-        elif self.prefer_chinese_text:
-            self.style_prompt = default_style
-        else:
-            self.style_prompt = custom_style
+        if custom_style:
+            style_parts.append(custom_style)
+        self.style_prompt = "\n".join(style_parts).strip()
         # 防刷：每用户独立 CD（秒）；0=关闭；管理员不受限
         self.cooldown_seconds = max(0, int(config.get("cooldown_seconds", 15)))
         # 单日全服总调用次数上限；0=不限制；超出后仅管理员可继续
@@ -119,7 +131,7 @@ class KktImagePlugin(Star):
             "[kkt] 插件已加载: commands=/hajimi,/kkt blacklist_count=%d model=%s "
             "endpoint=%s reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
             "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s "
-            "prefer_chinese_text=%s style_prompt_len=%d",
+            "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d",
             len(self.group_blacklist),
             self.model,
             f"{self.api_base}/chat/completions",
@@ -131,6 +143,7 @@ class KktImagePlugin(Star):
             self.enable_at_avatar,
             self.label_images,
             self.prefer_chinese_text,
+            self.prefer_cn_locale,
             len(self.style_prompt),
         )
         self._cleanup_stale_files()
