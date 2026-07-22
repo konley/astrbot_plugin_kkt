@@ -57,7 +57,7 @@
     "description": "启用 @用户头像",
     "type": "bool",
     "default": false,
-    "hint": "QQ 适配器中允许 /hajimi 或 /kkt 使用 @用户头像作为参考图"
+    "hint": "开启后收集消息中全部 @ 用户头像作为参考图，可与引用图/当前图片合并（如：引用底图 + @某人 把主角换成他）。需 QQ/aiocqhttp"
   },
   "reply_with_quote": {
     "description": "出图时引用原指令",

@@ -36,7 +36,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.3",
+    "0.3.4",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -514,13 +514,18 @@ class KktImagePlugin(Star):
                         if text:
                             quoted_texts.append(text)
 
-        # Include both quoted and current images; quoted text and At components are ignored.
+        # 引用图 + 当前消息图（文字 @ 不进 prompt，头像另算）
         for component in [*quoted_images, *current_images]:
             await add_image(component)
 
-        # 无现成图片时：enable_at_avatar 开启则收集全部 @ 用户头像（支持 N 个）
-        if self.enable_at_avatar and not images:
+        # enable_at_avatar：始终收集消息中的全部 @ 头像，可与引用图/当前图合并
+        # 场景：引用一张图 + @某人 → 底图 + 替换目标头像，例如「把主角换成 @xxx」
+        if self.enable_at_avatar:
             seen_qq: set[str] = set()
+            try:
+                self_id = str(event.get_self_id() or "").strip()
+            except Exception:
+                self_id = ""
             for component in event.get_messages():
                 if not isinstance(component, Comp.At):
                     continue
@@ -530,11 +535,6 @@ class KktImagePlugin(Star):
                 qq_str = str(qq).strip()
                 if not qq_str or qq_str in seen_qq:
                     continue
-                # 跳过 @机器人自己（若能取到）
-                try:
-                    self_id = str(event.get_self_id() or "").strip()
-                except Exception:
-                    self_id = ""
                 if self_id and qq_str == self_id:
                     continue
                 seen_qq.add(qq_str)
@@ -543,7 +543,12 @@ class KktImagePlugin(Star):
                 )
                 await add_image(avatar)
             if seen_qq:
-                logger.info("[kkt] 收集 @ 头像: count=%d qqs=%s", len(seen_qq), list(seen_qq)[:10])
+                logger.info(
+                    "[kkt] 收集 @ 头像: count=%d qqs=%s total_images=%d",
+                    len(seen_qq),
+                    list(seen_qq)[:10],
+                    len(images),
+                )
         return images, "\n".join(quoted_texts)
 
     async def _request_image(self, prompt: str, image_parts: list[dict]) -> str | None:
