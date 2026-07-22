@@ -59,6 +59,12 @@
     "default": false,
     "hint": "开启后收集消息中全部 @ 用户头像作为参考图，可与引用图/当前图片合并（如：引用底图 + @某人 把主角换成他）。需 QQ/aiocqhttp"
   },
+  "label_images": {
+    "description": "多图顺序标签",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后按【图1·引用原图】【图2·@头像】交错发送，并把 @xx/图片N 改写成图N，帮助模型理解先后与角色对应"
+  },
   "reply_with_quote": {
     "description": "出图时引用原指令",
     "type": "bool",

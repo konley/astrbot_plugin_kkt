@@ -370,3 +370,73 @@ def test_daily_quota_file_and_admin_bypass(tmp_path):
         assert await plugin._check_and_consume_daily_quota(admin) is None
 
     asyncio.run(run())
+
+
+def test_image_label_roles():
+    assert "引用" in Plugin._image_label({"source": "quote"}, 1)
+    assert "当前消息" in Plugin._image_label({"source": "message"}, 2)
+    assert "@小明" in Plugin._image_label({"source": "avatar", "name": "小明"}, 3)
+
+
+def test_rewrite_prompt_at_and_image_num():
+    items = [
+        {
+            "index": 1,
+            "source": "avatar",
+            "qq": "111",
+            "name": "xx",
+            "label": "图1 · @xx 的头像",
+        },
+        {
+            "index": 2,
+            "source": "avatar",
+            "qq": "222",
+            "name": "yy",
+            "label": "图2 · @yy 的头像",
+        },
+    ]
+    text = Plugin._rewrite_prompt_with_image_refs("让@xx给@yy洗脚", items)
+    assert "图1" in text and "图2" in text
+    assert "@xx" in text or "xx" in text
+
+    text2 = Plugin._rewrite_prompt_with_image_refs(
+        "让图片1手中的剑换成图片2的斧头",
+        [
+            {"index": 1, "source": "message"},
+            {"index": 2, "source": "message"},
+        ],
+    )
+    assert "图1" in text2 and "图2" in text2
+    assert "图片1" not in text2
+
+
+def test_build_multimodal_content_interleaved():
+    plugin = object.__new__(Plugin)
+    plugin.label_images = True
+    items = [
+        {
+            "index": 1,
+            "source": "quote",
+            "label": "图1 · 引用原图/底图",
+            "data_url": "data:image/jpeg;base64,AAA",
+        },
+        {
+            "index": 2,
+            "source": "avatar",
+            "qq": "3327241564",
+            "name": "北极",
+            "label": "图2 · @北极 的头像",
+            "data_url": "data:image/jpeg;base64,BBB",
+        },
+    ]
+    content = plugin._build_multimodal_content("把主角换成@北极", items)
+    types = [c["type"] for c in content]
+    assert types.count("image_url") == 2
+    assert types.count("text") >= 3
+    # 标签文本出现在对应图片之前
+    first_img = next(i for i, c in enumerate(content) if c["type"] == "image_url")
+    assert content[first_img - 1]["type"] == "text"
+    assert "图1" in content[first_img - 1]["text"]
+    joined = " ".join(c["text"] for c in content if c["type"] == "text")
+    assert "用户指令" in joined
+    assert "图2" in joined

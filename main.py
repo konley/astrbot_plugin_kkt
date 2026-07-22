@@ -36,7 +36,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.4",
+    "0.3.5",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -50,6 +50,11 @@ class KktImagePlugin(Star):
     _AT_TOKEN_RE = re.compile(
         r"@[\w\u4e00-\u9fff\-·.]+(?:\(\d+\))?",
         re.UNICODE,
+    )
+    # 用户口头编号：图片1 / 图2 / image 3
+    _USER_IMAGE_REF_RE = re.compile(
+        r"(?:图片|圖|图|image)\s*([0-9]+)",
+        re.IGNORECASE,
     )
 
     def __init__(self, context: Context, config: dict | None = None):
@@ -81,6 +86,8 @@ class KktImagePlugin(Star):
             strategy if strategy in {"随机", "顺序循环"} else "随机"
         )
         self.reaction_emoji_type = "1"
+        # 多图时用【图N】标签交错说明，帮助模型对齐角色/物体
+        self.label_images = bool(config.get("label_images", True))
         # 防刷：每用户独立 CD（秒）；0=关闭；管理员不受限
         self.cooldown_seconds = max(0, int(config.get("cooldown_seconds", 15)))
         # 单日全服总调用次数上限；0=不限制；超出后仅管理员可继续
@@ -96,7 +103,7 @@ class KktImagePlugin(Star):
         logger.info(
             "[kkt] 插件已加载: commands=/hajimi,/kkt blacklist_count=%d model=%s "
             "endpoint=%s reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
-            "cooldown=%ds daily_quota=%d enable_at_avatar=%s",
+            "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s",
             len(self.group_blacklist),
             self.model,
             f"{self.api_base}/chat/completions",
@@ -106,6 +113,7 @@ class KktImagePlugin(Star):
             self.cooldown_seconds,
             self.daily_quota,
             self.enable_at_avatar,
+            self.label_images,
         )
         self._cleanup_stale_files()
 
@@ -415,10 +423,10 @@ class KktImagePlugin(Star):
         # 先收集引用图文，再判断 help。
         # 否则裸 /kkt + 引用文案 会在读引用之前就被当成空 prompt 返回帮助。
         try:
-            image_parts, quoted_prompt = await self._collect_images(event)
+            image_items, quoted_prompt = await self._collect_images(event)
         except Exception as exc:
             logger.warning(f"[kkt] 读取引用内容失败: {exc}")
-            image_parts, quoted_prompt = [], ""
+            image_items, quoted_prompt = [], ""
 
         if quoted_prompt:
             prompt = f"{quoted_prompt}\n{prompt}".strip() if prompt else quoted_prompt
@@ -426,12 +434,13 @@ class KktImagePlugin(Star):
             prompt = ""
 
         logger.info(
-            "[kkt] 输入解析完成: prompt_length=%d image_count=%d quoted_prompt=%s",
+            "[kkt] 输入解析完成: prompt_length=%d image_count=%d quoted_prompt=%s labels=%s",
             len(prompt),
-            len(image_parts),
+            len(image_items),
             bool(quoted_prompt),
+            [item.get("label") for item in image_items][:8],
         )
-        if not prompt and not image_parts:
+        if not prompt and not image_items:
             yield event.plain_result(self._help_text)
             return
 
@@ -461,8 +470,13 @@ class KktImagePlugin(Star):
         asyncio.create_task(self._send_reaction_emoji(event))
 
         try:
-            logger.info("[kkt] 开始调用图像 API: model=%s image_count=%d", self.model, len(image_parts))
-            result = await self._request_image(prompt, image_parts)
+            logger.info(
+                "[kkt] 开始调用图像 API: model=%s image_count=%d label_images=%s",
+                self.model,
+                len(image_items),
+                self.label_images,
+            )
+            result = await self._request_image(prompt, image_items, event)
             if not result:
                 logger.error("[kkt] API 调用完成但未解析出图片")
                 yield event.plain_result("API 返回中没有找到图片，请检查模型和接口响应格式。")
@@ -478,13 +492,25 @@ class KktImagePlugin(Star):
             logger.error(f"[kkt] 图片生成失败: {exc}")
             yield event.plain_result(f"图片生成失败：{exc}")
 
-    async def _collect_images(self, event: AstrMessageEvent) -> tuple[list[dict], str]:
-        """Collect quoted text/images while ignoring automatic mentions."""
-        images = []
-        seen = set()
-        quoted_texts = []
+    async def _collect_images(
+        self, event: AstrMessageEvent
+    ) -> tuple[list[dict], str]:
+        """收集参考图，带 source/label 元数据。
 
-        async def add_image(component):
+        顺序固定：引用图 → 当前消息图 → @头像。
+        每项: {data_url, source, qq?, name?}
+        """
+        images: list[dict] = []
+        seen: set[str] = set()
+        quoted_texts: list[str] = []
+
+        async def add_image(
+            component,
+            *,
+            source: str,
+            qq: str | None = None,
+            name: str | None = None,
+        ) -> None:
             if not isinstance(component, Comp.Image):
                 return
             value = getattr(component, "url", None) or getattr(component, "file", None)
@@ -493,14 +519,21 @@ class KktImagePlugin(Star):
             seen.add(value)
             try:
                 encoded = await component.convert_to_base64()
-                images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
             except Exception as exc:
                 logger.warning(f"[kkt] 图片转 Base64 失败: {exc}")
+                return
+            images.append(
+                {
+                    "data_url": f"data:image/jpeg;base64,{encoded}",
+                    "source": source,
+                    "qq": qq,
+                    "name": name,
+                }
+            )
 
-        current_images = []
-        quoted_images = []
-        components = event.get_messages()
-        for component in components:
+        current_images: list = []
+        quoted_images: list = []
+        for component in event.get_messages():
             if isinstance(component, Comp.Image):
                 value = getattr(component, "url", None) or getattr(component, "file", None)
                 if value:
@@ -514,12 +547,12 @@ class KktImagePlugin(Star):
                         if text:
                             quoted_texts.append(text)
 
-        # 引用图 + 当前消息图（文字 @ 不进 prompt，头像另算）
-        for component in [*quoted_images, *current_images]:
-            await add_image(component)
+        for component in quoted_images:
+            await add_image(component, source="quote")
+        for component in current_images:
+            await add_image(component, source="message")
 
-        # enable_at_avatar：始终收集消息中的全部 @ 头像，可与引用图/当前图合并
-        # 场景：引用一张图 + @某人 → 底图 + 替换目标头像，例如「把主角换成 @xxx」
+        # enable_at_avatar：全部 @ 头像，可与引用图/当前图合并
         if self.enable_at_avatar:
             seen_qq: set[str] = set()
             try:
@@ -538,10 +571,21 @@ class KktImagePlugin(Star):
                 if self_id and qq_str == self_id:
                     continue
                 seen_qq.add(qq_str)
+                display = (
+                    getattr(component, "name", None)
+                    or getattr(component, "nickname", None)
+                    or getattr(component, "display_name", None)
+                    or qq_str
+                )
                 avatar = Comp.Image.fromURL(
                     f"https://q1.qlogo.cn/g?b=qq&nk={qq_str}&s=640"
                 )
-                await add_image(avatar)
+                await add_image(
+                    avatar,
+                    source="avatar",
+                    qq=qq_str,
+                    name=str(display).strip() or qq_str,
+                )
             if seen_qq:
                 logger.info(
                     "[kkt] 收集 @ 头像: count=%d qqs=%s total_images=%d",
@@ -549,15 +593,141 @@ class KktImagePlugin(Star):
                     list(seen_qq)[:10],
                     len(images),
                 )
+
+        # 编号标签（1-based）
+        for index, item in enumerate(images, start=1):
+            item["index"] = index
+            item["label"] = self._image_label(item, index)
+
         return images, "\n".join(quoted_texts)
 
-    async def _request_image(self, prompt: str, image_parts: list[dict]) -> str | None:
-        content = []
-        if prompt:
-            content.append({"type": "text", "text": prompt})
-        content.extend(image_parts)
-        if not content:
-            content.append({"type": "text", "text": "请生成一张图片"})
+    @staticmethod
+    def _image_label(item: dict, index: int) -> str:
+        source = item.get("source") or "image"
+        if source == "quote":
+            role = "引用原图/底图"
+        elif source == "message":
+            role = "当前消息图片"
+        elif source == "avatar":
+            name = item.get("name") or item.get("qq") or "用户"
+            role = f"@{name} 的头像"
+        else:
+            role = "参考图"
+        return f"图{index} · {role}"
+
+    @classmethod
+    def _rewrite_prompt_with_image_refs(
+        cls, prompt: str, image_items: list[dict]
+    ) -> str:
+        """把 @昵称 / 图片N 改写成 图N，方便模型对齐。"""
+        text = (prompt or "").strip()
+        if not text or not image_items:
+            return text
+
+        # 1) 用户口头「图片1/图2」→「图1/图2」
+        def repl_num(match: re.Match) -> str:
+            return f"图{int(match.group(1))}"
+
+        text = cls._USER_IMAGE_REF_RE.sub(repl_num, text)
+
+        # 2) 头像图：按 qq / 昵称 把 @xxx 换成 图N（@xxx）
+        # 先替换更长的昵称，避免短名误伤
+        avatar_items = [
+            item for item in image_items if item.get("source") == "avatar"
+        ]
+        avatar_items.sort(
+            key=lambda it: len(str(it.get("name") or it.get("qq") or "")),
+            reverse=True,
+        )
+        for item in avatar_items:
+            index = item.get("index")
+            qq = str(item.get("qq") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if not index:
+                continue
+            patterns: list[str] = []
+            if qq:
+                patterns.append(re.escape(f"@{qq}"))
+                patterns.append(re.escape(f"@{name}({qq})") if name else "")
+                patterns.append(rf"@[\w\u4e00-\u9fff\-·.]+\({re.escape(qq)}\)")
+            if name and name != qq:
+                patterns.append(re.escape(f"@{name}"))
+            for pat in patterns:
+                if not pat:
+                    continue
+                text = re.sub(
+                    pat,
+                    f"图{index}（@{name or qq}）",
+                    text,
+                    count=1,
+                )
+        return text
+
+    def _build_multimodal_content(
+        self,
+        prompt: str,
+        image_items: list[dict],
+        event: AstrMessageEvent | None = None,
+    ) -> list[dict]:
+        """组装发给模型的 content：可选【图N】标签与图片交错。"""
+        rewritten = self._rewrite_prompt_with_image_refs(prompt, image_items)
+        # 再剥一层可能残留的纯 @token（未映射成功时）
+        if event is not None and rewritten.startswith("@"):
+            rewritten = self._strip_at_tokens(rewritten) or rewritten
+
+        content: list[dict] = []
+        use_labels = self.label_images and len(image_items) >= 1
+
+        if use_labels and image_items:
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "以下按顺序给出参考图片。每张图前有【图N · 说明】标签；"
+                        "请严格按标签理解人物/物体对应关系，并按用户指令生成或编辑图片。"
+                    ),
+                }
+            )
+            for item in image_items:
+                label = item.get("label") or f"图{item.get('index', '?')}"
+                content.append({"type": "text", "text": f"【{label}】"})
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": item["data_url"]},
+                    }
+                )
+            final_prompt = rewritten or "请根据以上参考图生成一张图片"
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"用户指令：{final_prompt}",
+                }
+            )
+        else:
+            if rewritten:
+                content.append({"type": "text", "text": rewritten})
+            for item in image_items:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": item["data_url"]},
+                    }
+                )
+            if not content:
+                content.append({"type": "text", "text": "请生成一张图片"})
+        return content
+
+    async def _request_image(
+        self,
+        prompt: str,
+        image_items: list[dict],
+        event: AstrMessageEvent | None = None,
+    ) -> str | None:
+        content = self._build_multimodal_content(prompt, image_items, event)
+        image_count = sum(
+            1 for part in content if isinstance(part, dict) and part.get("type") == "image_url"
+        )
 
         payload = {
             "model": self.model,
@@ -571,11 +741,12 @@ class KktImagePlugin(Star):
         endpoint = f"{self.api_base}/chat/completions"
         last_error = "未知错误"
         logger.debug(
-            "[kkt] 请求准备完成: endpoint=%s model=%s prompt_length=%d image_count=%d payload_bytes≈%d",
+            "[kkt] 请求准备完成: endpoint=%s model=%s prompt_length=%d image_count=%d content_parts=%d payload_bytes≈%d",
             endpoint,
             self.model,
             len(prompt),
-            len(image_parts),
+            image_count,
+            len(content),
             len(json.dumps(payload, ensure_ascii=False)),
         )
 
