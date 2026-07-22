@@ -67,6 +67,16 @@ class KktImagePlugin(Star):
         self.temp_dir = Path(get_astrbot_data_path()) / "plugin_data" / "kkt"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self._help_text = build_help_text(self.command, self.aliases, self.allow_without_slash)
+        logger.info(
+            "[kkt] 插件已加载: command=/%s aliases=%s allow_without_slash=%s "
+            "blacklist_count=%d model=%s endpoint=%s",
+            self.command,
+            self.aliases,
+            self.allow_without_slash,
+            len(self.group_blacklist),
+            self.model,
+            f"{self.api_base}/chat/completions",
+        )
         self._cleanup_stale_files()
 
     @staticmethod
@@ -95,9 +105,17 @@ class KktImagePlugin(Star):
     async def handle_message(self, event: AstrMessageEvent):
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
+            logger.debug("[kkt] 忽略黑名单群消息: group_id=%s", group_id)
             return
 
         raw = (event.message_str or "").strip()
+        logger.debug(
+            "[kkt] 收到消息: group_id=%s sender_id=%s message=%r components=%d",
+            group_id or "private",
+            event.get_sender_id(),
+            raw[:200],
+            len(event.get_messages()),
+        )
         command_pattern = "|".join(re.escape(word) for word in [self.command, *self.aliases])
         prefix = r"/?" if self.allow_without_slash else r"/"
         command_match = re.match(
@@ -108,6 +126,11 @@ class KktImagePlugin(Star):
         if not command_match:
             return
 
+        logger.info(
+            "[kkt] 指令匹配: command=%s prompt=%r",
+            raw.split()[0] if raw.split() else raw,
+            (command_match.group(1) or "").strip()[:200],
+        )
         event.stop_event()
         prompt = (command_match.group(1) or "").strip()
         if prompt.lower() in {"帮助", "help", "?"}:
@@ -117,6 +140,7 @@ class KktImagePlugin(Star):
             return
 
         if not self.api_key:
+            logger.error("[kkt] 未配置 API Key")
             yield event.plain_result(
                 "未配置 NewAPI Key，请在 AstrBot WebUI 的 Hajimi 图片生成插件配置中填写 api_key。"
             )
@@ -131,19 +155,28 @@ class KktImagePlugin(Star):
         if quoted_prompt:
             prompt = f"{quoted_prompt}\n{prompt}".strip()
 
+        logger.info(
+            "[kkt] 输入解析完成: prompt_length=%d image_count=%d quoted_prompt=%s",
+            len(prompt),
+            len(image_parts),
+            bool(quoted_prompt),
+        )
         if not prompt and not image_parts:
             yield event.plain_result(self._help_text)
             return
 
         try:
+            logger.info("[kkt] 开始调用图像 API: model=%s image_count=%d", self.model, len(image_parts))
             result = await self._request_image(prompt, image_parts)
             if not result:
+                logger.error("[kkt] API 调用完成但未解析出图片")
                 yield event.plain_result("API 返回中没有找到图片，请检查模型和接口响应格式。")
                 return
             image_path = await self._materialize_image(result)
             if not image_path:
                 yield event.plain_result("图片下载或解析失败，请稍后重试。")
                 return
+            logger.info("[kkt] 图片处理成功: path=%s", image_path)
             yield event.chain_result([Comp.Image(file=str(image_path))])
             self._schedule_cleanup(image_path)
         except Exception as exc:
@@ -219,13 +252,28 @@ class KktImagePlugin(Star):
         }
         endpoint = f"{self.api_base}/chat/completions"
         last_error = "未知错误"
+        logger.debug(
+            "[kkt] 请求准备完成: endpoint=%s model=%s prompt_length=%d image_count=%d payload_bytes≈%d",
+            endpoint,
+            self.model,
+            len(prompt),
+            len(image_parts),
+            len(json.dumps(payload, ensure_ascii=False)),
+        )
 
         for attempt in range(self.max_retry + 1):
             try:
                 timeout = aiohttp.ClientTimeout(total=self.timeout)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
+                    logger.info("[kkt] API 请求发送: attempt=%d/%d", attempt + 1, self.max_retry + 1)
                     async with session.post(endpoint, headers=headers, json=payload) as response:
                         raw = await response.text()
+                        logger.info(
+                            "[kkt] API 响应: attempt=%d status=%d bytes=%d",
+                            attempt + 1,
+                            response.status,
+                            len(raw),
+                        )
                         if response.status in {401, 403}:
                             raise RuntimeError("API Key 无效或没有模型权限")
                         if response.status == 429:
@@ -242,10 +290,24 @@ class KktImagePlugin(Star):
                             raise RuntimeError(f"API 返回非 JSON：{raw[:200]}") from exc
                         image = self._extract_image(data)
                         if image:
+                            logger.info(
+                                "[kkt] API 图片解析成功: source=%s",
+                                "data_url" if image.startswith("data:") else "url",
+                            )
                             return image
+                        logger.error(
+                            "[kkt] API JSON 未找到图片: top_keys=%s choices=%d",
+                            list(data)[:20] if isinstance(data, dict) else type(data).__name__,
+                            len(data.get("choices", [])) if isinstance(data, dict) else 0,
+                        )
                         raise RuntimeError("API 响应中未找到图片")
             except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
                 last_error = str(exc)
+                logger.error(
+                    "[kkt] API 请求失败: attempt=%d error=%s",
+                    attempt + 1,
+                    last_error[:300],
+                )
                 if attempt < self.max_retry and not ("Key 无效" in last_error or "权限" in last_error):
                     await asyncio.sleep(self.retry_delay)
                     continue
