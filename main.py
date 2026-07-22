@@ -29,8 +29,10 @@ def build_help_text() -> str:
         "image2：/image2 <提示词>（独立模型与 API Key；走 /images 接口）\n"
         "回复图片后：/hajimi <编辑提示词> 或 /kkt <编辑提示词> 或 /image2 <编辑提示词>\n"
         "说明：/image2 有参考图时走 images/edits（默认取第 1 张）；多图复杂编辑建议 /kkt\n"
-        "限额查询：/kkt额度 或 /kktquota 或 /hajimi额度\n"
-        "重置今日限额（仅管理员）：/kkt重置额度 或 /kktresetquota\n"
+        "限额查询：/kkt额度 或 /hajimi额度 或 /image2额度（三通道共用一套日配额）\n"
+        "调整日限额（仅管理员，已用不变）：/kkt额度 10 或 /hajimi额度 10 或 /image2额度 10\n"
+        "关闭日限额：/kkt额度 0\n"
+        "重置今日已用（仅管理员）：/kkt重置额度 或 /kktresetquota\n"
         "帮助：/hajimi help 或 /kkt help 或 /image2 help\n"
         "支持文生图、回复图片编辑和 @用户头像参考图。"
     )
@@ -40,7 +42,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.6.0",
+    "0.6.1",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -141,14 +143,17 @@ class KktImagePlugin(Star):
         # 防刷：每用户独立 CD（秒）；0=关闭；管理员不受限
         self.cooldown_seconds = max(0, int(config.get("cooldown_seconds", 15)))
         # 单日全服总调用次数上限；0=不限制；超出后仅管理员可继续
-        self.daily_quota = max(0, int(config.get("daily_quota", 50)))
+        # 配置默认值；运行时可由管理员指令覆盖并写入 runtime 覆盖文件
+        self._daily_quota_config_default = max(0, int(config.get("daily_quota", 50)))
         self.cleanup_delay = max(5, int(config.get("cleanup_delay", 15)))
         self.temp_dir = Path(get_astrbot_data_path()) / "plugin_data" / "kkt"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.quota_path = self.temp_dir / "daily_quota.json"
+        self.quota_limit_override_path = self.temp_dir / "daily_quota_limit.json"
         # 内存：sender_id -> 上次成功触发生图的 monotonic 时间
         self._user_last_call: dict[str, float] = {}
         self._quota_lock = asyncio.Lock()
+        self.daily_quota = self._load_daily_quota_limit()
         self._help_text = build_help_text()
         logger.info(
             "[kkt] 插件已加载: commands=/hajimi,/kkt,/image2 blacklist_count=%d "
@@ -409,13 +414,74 @@ class KktImagePlugin(Star):
         except Exception as exc:
             logger.warning("[kkt] 写入日配额失败: %s", exc)
 
+    def _load_daily_quota_limit(self) -> int:
+        """读取运行时日限额；无覆盖文件则用插件配置默认值。"""
+        try:
+            path = self.quota_limit_override_path
+            if not path.exists():
+                return self._daily_quota_config_default
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or "limit" not in data:
+                return self._daily_quota_config_default
+            return max(0, int(data.get("limit")))
+        except Exception as exc:
+            logger.warning("[kkt] 读取日限额覆盖失败，回退配置默认: %s", exc)
+            return self._daily_quota_config_default
+
+    def _save_daily_quota_limit(self, limit: int) -> None:
+        """持久化运行时日限额（不改 WebUI 配置文件，不重置已用次数）。"""
+        limit = max(0, int(limit))
+        payload = {
+            "limit": limit,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "command",
+        }
+        self.quota_limit_override_path.parent.mkdir(parents=True, exist_ok=True)
+        self.quota_limit_override_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.daily_quota = limit
+        logger.info("[kkt] 日限额已更新: limit=%d", limit)
+
+    @staticmethod
+    def _parse_quota_limit_arg(text: str) -> int | None:
+        """解析额度指令参数。
+
+        支持：
+        - 空 / 无数字 -> None（表示查询）
+        - "10" / "额度 10" / "限额10" / "set 10" / "to10"
+        返回非负整数；解析失败返回 None（调用方再判断是否非法）。
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        # 去掉常见前缀词，只留数字
+        cleaned = re.sub(
+            r"(?i)^\s*(?:额度|限额|配额|quota|limit|set|to|为|到|=|:|：)+",
+            "",
+            raw,
+        ).strip()
+        cleaned = re.sub(r"\s+", "", cleaned)
+        if not cleaned:
+            return None
+        if re.fullmatch(r"\d+", cleaned):
+            return int(cleaned)
+        # 兜底：整段里抓第一个整数
+        match = re.search(r"(\d+)", raw)
+        if match and re.fullmatch(r"[\D]*\d+[\D]*", raw.replace(" ", "")):
+            # 避免把「查看10次记录」这类误当 set；仅当文本基本是“词+数字”
+            return int(match.group(1))
+        return None
+
     def _format_quota_status(self, event: AstrMessageEvent | None = None) -> str:
         """生成限额状态文案（含日配额与当前用户 CD）。"""
         today = date.today().isoformat()
         if self.daily_quota <= 0:
-            daily_line = "今日总配额：不限制"
-            used = 0
-            remain = -1
+            daily_line = "今日总配额：不限制（limit=0）"
+            used = int(self._load_quota_state().get("count") or 0)
+            if used:
+                daily_line += f"\n今日已用计数：{used}（关闭限额时仍保留统计）"
         else:
             state = self._load_quota_state()
             used = int(state.get("count") or 0)
@@ -426,8 +492,14 @@ class KktImagePlugin(Star):
             )
 
         lines = [
-            "【Hajimi / kkt 限额】",
+            "【Hajimi / kkt / image2 公用限额】",
             daily_line,
+            f"配置默认限额：{self._daily_quota_config_default}"
+            + (
+                "（当前已被指令覆盖）"
+                if self.daily_quota != self._daily_quota_config_default
+                else ""
+            ),
         ]
 
         if self.cooldown_seconds <= 0:
@@ -452,8 +524,20 @@ class KktImagePlugin(Star):
             lines.append(f"个人冷却：{self.cooldown_seconds}s")
 
         lines.append("超出日配额后仅管理员可继续生图。")
-        lines.append("管理员重置今日配额：/kkt重置额度 或 /kktresetquota")
+        lines.append("管理员调限额（已用不变）：/kkt额度 10 或 /hajimi额度 10 或 /image2额度 10")
+        lines.append("管理员重置今日已用：/kkt重置额度 或 /kktresetquota")
         return "\n".join(lines)
+
+    async def _set_daily_quota_limit(self, limit: int) -> dict:
+        """设置日限额上限；不修改已用 count。"""
+        async with self._quota_lock:
+            self._save_daily_quota_limit(limit)
+            state = self._load_quota_state()
+            return {
+                "limit": self.daily_quota,
+                "used": int(state.get("count") or 0),
+                "date": state.get("date") or date.today().isoformat(),
+            }
 
     async def _reset_daily_quota(self) -> dict:
         """将今日已用次数清零。返回新状态。"""
@@ -570,43 +654,124 @@ class KktImagePlugin(Star):
         # 全是空 / 纯 @：返回空，交给后续 help 或引用文案逻辑
         return ""
 
-    @filter.command("kkt额度", alias={"hajimi额度", "kktquota", "hajimiquota", "kkt限额", "hajimi限额"})
-    async def handle_quota_status(self, event: AstrMessageEvent):
-        """查看当前日配额与个人 CD。"""
+    @filter.command(
+        "kkt额度",
+        alias={
+            "hajimi额度",
+            "image2额度",
+            "kktquota",
+            "hajimiquota",
+            "image2quota",
+            "kkt限额",
+            "hajimi限额",
+            "image2限额",
+            "kkt配额",
+            "hajimi配额",
+            "image2配额",
+        },
+    )
+    async def handle_quota_status(self, event: AstrMessageEvent, arg: GreedyStr = ""):
+        """查看或设置日配额。
+
+        - /kkt额度 -> 查询
+        - /kkt额度 10 -> 管理员将日上限改为 10，已用次数不变
+        hajimi / image2 同义，三通道共用一套配额。
+        """
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             return
         event.stop_event()
-        yield event.plain_result(self._format_quota_status(event))
+
+        # 优先用框架解析的 arg；空则从整句再抽一次，兼容 /kkt额度10
+        raw_arg = str(arg or "").strip()
+        if not raw_arg:
+            msg = (event.get_message_str() or "").strip()
+            # 去掉命令前缀
+            raw_arg = re.sub(
+                r"(?i)^/?(?:kkt|hajimi|image2)(?:额度|限额|配额|quota)\s*",
+                "",
+                msg,
+            ).strip()
+
+        limit = self._parse_quota_limit_arg(raw_arg)
+        # 有参数但解析不出合法数字
+        if raw_arg and limit is None:
+            yield event.plain_result(
+                "额度参数无效。\n"
+                "查询：/kkt额度\n"
+                "管理员设置上限（已用不变）：/kkt额度 10\n"
+                "关闭日限额：/kkt额度 0\n"
+                "也可用 /hajimi额度 10 或 /image2额度 10（共用一套）"
+            )
+            return
+
+        if limit is None:
+            yield event.plain_result(self._format_quota_status(event))
+            return
+
+        if not self._is_admin(event):
+            yield event.plain_result(
+                "只有管理员可以调整日限额。\n" + self._format_quota_status(event)
+            )
+            return
+
+        old_limit = self.daily_quota
+        result = await self._set_daily_quota_limit(limit)
+        used = int(result["used"])
+        new_limit = int(result["limit"])
+        if new_limit <= 0:
+            head = (
+                f"已关闭日限额（limit=0）。已用次数保持为 {used}，"
+                "普通用户将不再受日配额拦截。"
+            )
+        else:
+            remain = max(0, new_limit - used)
+            head = (
+                f"已将日限额从 {old_limit} 调整为 {new_limit}。"
+                f"已用次数不变：{used}/{new_limit}，剩余 {remain}。"
+            )
+            if used > new_limit:
+                head += "（当前已用已超过新上限，普通用户将无法继续，管理员仍可）"
+        logger.info(
+            "[kkt] 管理员调整日限额: operator=%s old=%d new=%d used=%d",
+            event.get_sender_id(),
+            old_limit,
+            new_limit,
+            used,
+        )
+        yield event.plain_result(head + "\n" + self._format_quota_status(event))
 
     @filter.command(
         "kkt重置额度",
         alias={
             "hajimi重置额度",
+            "image2重置额度",
             "kktresetquota",
             "hajimiresetquota",
+            "image2resetquota",
             "kkt清零额度",
             "hajimi清零额度",
+            "image2清零额度",
         },
     )
     async def handle_quota_reset(self, event: AstrMessageEvent):
-        """重置今日总配额（仅管理员）。"""
+        """重置今日已用次数（仅管理员）；不改日限额上限。"""
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             return
         event.stop_event()
         if not self._is_admin(event):
-            yield event.plain_result("只有管理员可以重置今日生图限额。")
+            yield event.plain_result("只有管理员可以重置今日已用次数。")
             return
         await self._reset_daily_quota()
-        # 管理员重置时可选：不清个人 CD，只清日配额
         text = (
-            "已重置今日生图总配额。\n"
+            f"已将今日已用次数清零（日限额上限仍为 {self.daily_quota}）。\n"
             + self._format_quota_status(event)
         )
         logger.info(
-            "[kkt] 管理员重置配额: operator=%s",
+            "[kkt] 管理员重置已用次数: operator=%s limit=%d",
             event.get_sender_id(),
+            self.daily_quota,
         )
         yield event.plain_result(text)
 
@@ -671,8 +836,11 @@ class KktImagePlugin(Star):
         )
         event.stop_event()
 
-        # 兼容：/kkt 额度、/kkt 重置额度 写在主指令参数里
-        normalized = re.sub(r"\s+", "", prompt.lower())
+        # 兼容：/kkt 额度、/kkt 额度 10、/kkt 重置额度 写在主指令参数里
+        # 三通道共用，prompt 来自 /kkt|/hajimi|/image2 参数部分
+        prompt_stripped = (prompt or "").strip()
+        normalized = re.sub(r"\s+", "", prompt_stripped.lower())
+        # 查询
         if normalized in {
             "额度",
             "限额",
@@ -683,6 +851,41 @@ class KktImagePlugin(Star):
         }:
             yield event.plain_result(self._format_quota_status(event))
             return
+        # 设置：额度10 / 额度 10 / quota10 / 限额=20
+        set_match = re.fullmatch(
+            r"(?:额度|限额|配额|quota|limit)\s*(?:=|：|:|为|到)?\s*(\d+)",
+            prompt_stripped,
+            flags=re.IGNORECASE,
+        )
+        if set_match:
+            if not self._is_admin(event):
+                yield event.plain_result(
+                    "只有管理员可以调整日限额。\n" + self._format_quota_status(event)
+                )
+                return
+            new_limit = int(set_match.group(1))
+            old_limit = self.daily_quota
+            result = await self._set_daily_quota_limit(new_limit)
+            used = int(result["used"])
+            if new_limit <= 0:
+                head = (
+                    f"已关闭日限额（limit=0）。已用次数保持为 {used}。"
+                )
+            else:
+                remain = max(0, new_limit - used)
+                head = (
+                    f"已将日限额从 {old_limit} 调整为 {new_limit}。"
+                    f"已用次数不变：{used}/{new_limit}，剩余 {remain}。"
+                )
+            logger.info(
+                "[kkt] 管理员调整日限额(主指令参数): operator=%s old=%d new=%d used=%d",
+                event.get_sender_id(),
+                old_limit,
+                new_limit,
+                used,
+            )
+            yield event.plain_result(head + "\n" + self._format_quota_status(event))
+            return
         if normalized in {
             "重置额度",
             "清零额度",
@@ -692,11 +895,12 @@ class KktImagePlugin(Star):
             "reset",
         }:
             if not self._is_admin(event):
-                yield event.plain_result("只有管理员可以重置今日生图限额。")
+                yield event.plain_result("只有管理员可以重置今日已用次数。")
                 return
             await self._reset_daily_quota()
             yield event.plain_result(
-                "已重置今日生图总配额。\n" + self._format_quota_status(event)
+                f"已将今日已用次数清零（日限额上限仍为 {self.daily_quota}）。\n"
+                + self._format_quota_status(event)
             )
             return
 
