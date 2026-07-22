@@ -15,7 +15,13 @@
     "description": "NewAPI API Key（/hajimi /kkt）",
     "type": "string",
     "default": "",
-    "hint": "默认通道密钥；/hajimi 与 /kkt 使用。不会用于 /image2"
+    "hint": "默认通道主密钥；/hajimi 与 /kkt 使用。不会用于 /image2"
+  },
+  "backup_api_keys": {
+    "description": "备用 API Key 列表（/hajimi /kkt）",
+    "type": "list",
+    "default": [],
+    "hint": "主 api_key 失败（401/403/429/5xx/无渠道）后按顺序切换；可填多个，自动去重。也可粘贴逗号/换行分隔"
   },
   "model": {
     "description": "图像模型（/hajimi /kkt）",
@@ -27,7 +33,13 @@
     "description": "image2 专用 API Key",
     "type": "string",
     "default": "",
-    "hint": "仅 /image2 使用，必须单独配置；不会回退到上面的 api_key"
+    "hint": "仅 /image2 使用的主密钥；不会回退到上面的 api_key"
+  },
+  "image2_backup_api_keys": {
+    "description": "image2 备用 API Key 列表",
+    "type": "list",
+    "default": [],
+    "hint": "仅 /image2：主 image2_api_key 失败后按顺序切换；可填多个，自动去重"
   },
   "image2_model": {
     "description": "image2 模型",
@@ -39,13 +51,26 @@
     "description": "image2 API 基址（可选）",
     "type": "string",
     "default": "",
-    "hint": "留空则与 api_base 相同；一般无需填写 /chat/completions"
+    "hint": "留空则与 api_base 相同；不要填完整 /images/generations 路径"
+  },
+  "image2_api_mode": {
+    "description": "image2 接口模式",
+    "type": "string",
+    "default": "images",
+    "options": ["images", "chat", "auto"],
+    "hint": "images=走 /v1/images/generations|edits（gpt-image-2 推荐）；chat=仍走 chat/completions；auto=按模型名猜测。不影响 /kkt /hajimi"
+  },
+  "image2_size": {
+    "description": "image2 出图尺寸",
+    "type": "string",
+    "default": "1024x1024",
+    "hint": "仅 image2 images 模式使用，例如 1024x1024；上游不支持时可能忽略"
   },
   "temperature": {
     "description": "Temperature",
     "type": "float",
     "default": 0.7,
-    "hint": "发送给 chat/completions 的 temperature 参数"
+    "hint": "发送给 chat/completions 的 temperature 参数（/kkt 与 image2 chat 模式）"
   },
   "timeout": {
     "description": "请求超时秒数",

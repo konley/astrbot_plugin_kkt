@@ -26,8 +26,9 @@ def build_help_text() -> str:
     return (
         "Hajimi 图片生成\n"
         "用法：/hajimi <提示词> 或 /kkt <提示词>\n"
-        "image2：/image2 <提示词>（独立模型与 API Key）\n"
+        "image2：/image2 <提示词>（独立模型与 API Key；走 /images 接口）\n"
         "回复图片后：/hajimi <编辑提示词> 或 /kkt <编辑提示词> 或 /image2 <编辑提示词>\n"
+        "说明：/image2 有参考图时走 images/edits（默认取第 1 张）；多图复杂编辑建议 /kkt\n"
         "限额查询：/kkt额度 或 /kktquota 或 /hajimi额度\n"
         "重置今日限额（仅管理员）：/kkt重置额度 或 /kktresetquota\n"
         "帮助：/hajimi help 或 /kkt help 或 /image2 help\n"
@@ -39,7 +40,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.4.0",
+    "0.6.0",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -70,15 +71,26 @@ class KktImagePlugin(Star):
         self.api_key = str(config.get("api_key", "")).strip() or os.getenv(
             "NEW_API_KEY", ""
         ).strip()
+        # 主 Key 失败后按顺序尝试的备用 Key（同 api_base / model）
+        self.backup_api_keys = self._parse_secret_list(
+            config.get("backup_api_keys", [])
+        )
         self.model = str(config.get("model", "gemini-3.1-flash-image")).strip()
         # /image2 独立通道：模型 + Key（Key 必填独立；未配置则 image2 不可用）
         self.image2_model = str(
             config.get("image2_model", "gpt-image-2")
         ).strip() or "gpt-image-2"
         self.image2_api_key = str(config.get("image2_api_key", "") or "").strip()
+        self.image2_backup_api_keys = self._parse_secret_list(
+            config.get("image2_backup_api_keys", [])
+        )
         # 可选：image2 用不同基址，空则复用 api_base
         image2_base = str(config.get("image2_api_base", "") or "").strip().rstrip("/")
         self.image2_api_base = image2_base or self.api_base
+        # image2 协议：images=走 /images/*；chat=走 chat/completions；auto=按模型猜测
+        mode = str(config.get("image2_api_mode", "images") or "images").strip().lower()
+        self.image2_api_mode = mode if mode in {"images", "chat", "auto"} else "images"
+        self.image2_size = str(config.get("image2_size", "1024x1024") or "1024x1024").strip()
         self.temperature = max(0.0, min(2.0, float(config.get("temperature", 0.7))))
         self.timeout = max(10, int(config.get("timeout", 180)))
         self.max_retry = max(0, min(5, int(config.get("max_retry", 2))))
@@ -140,7 +152,8 @@ class KktImagePlugin(Star):
         self._help_text = build_help_text()
         logger.info(
             "[kkt] 插件已加载: commands=/hajimi,/kkt,/image2 blacklist_count=%d "
-            "model=%s image2_model=%s image2_key=%s endpoint=%s image2_endpoint=%s "
+            "model=%s image2_model=%s image2_key=%s main_keys=%d image2_keys=%d "
+            "endpoint=%s image2_mode=%s image2_size=%s "
             "reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
             "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s "
             "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d",
@@ -148,8 +161,15 @@ class KktImagePlugin(Star):
             self.model,
             self.image2_model,
             "set" if self.image2_api_key else "missing",
+            len(self._build_key_chain(self.api_key, self.backup_api_keys)),
+            len(
+                self._build_key_chain(
+                    self.image2_api_key, self.image2_backup_api_keys
+                )
+            ),
             f"{self.api_base}/chat/completions",
-            f"{self.image2_api_base}/chat/completions",
+            self.image2_api_mode,
+            self.image2_size,
             self.reply_with_quote,
             self.reaction_emoji_enabled,
             len(self.reaction_emoji_list),
@@ -173,6 +193,50 @@ class KktImagePlugin(Star):
             group_id.strip() for group_id in map(str, value)
             if re.fullmatch(r"\d+", group_id.strip())
         }
+
+    @staticmethod
+    def _parse_secret_list(value) -> list[str]:
+        """解析备用 Key 列表；支持 list 或逗号/换行分隔字符串，保序去重。"""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.replace("，", ",").replace("\r\n", "\n").replace("\r", "\n")
+            parts = re.split(r"[\n,;|]+", text)
+        elif isinstance(value, list):
+            parts = [str(item) for item in value]
+        else:
+            parts = [str(value)]
+        result: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            key = part.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(key)
+        return result
+
+    @staticmethod
+    def _build_key_chain(primary: str, backups: list[str] | None = None) -> list[str]:
+        """主 Key + 备用 Key，保序去重；空串忽略。"""
+        chain: list[str] = []
+        seen: set[str] = set()
+        for key in [primary or "", *(backups or [])]:
+            item = str(key or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            chain.append(item)
+        return chain
+
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "empty"
+        if len(text) <= 10:
+            return text[:2] + "***"
+        return f"{text[:6]}...{text[-4:]}"
 
     @staticmethod
     def _coerce_positive_int(value) -> int | None:
@@ -570,20 +634,26 @@ class KktImagePlugin(Star):
             return "kkt"
         return "hajimi"
 
-    def _resolve_api_credentials(self, command: str) -> tuple[str, str, str] | str:
-        """返回 (api_base, api_key, model)；失败返回错误文案。"""
+    def _resolve_api_credentials(
+        self, command: str
+    ) -> tuple[str, list[str], str] | str:
+        """返回 (api_base, api_keys[主+备], model)；失败返回错误文案。"""
         if command == "image2":
-            if not self.image2_api_key:
+            keys = self._build_key_chain(
+                self.image2_api_key, self.image2_backup_api_keys
+            )
+            if not keys:
                 return (
                     "未配置 image2 专用 API Key。请在插件配置中填写 image2_api_key"
                     "（不会使用默认 api_key）。"
                 )
-            return self.image2_api_base, self.image2_api_key, self.image2_model
-        if not self.api_key:
+            return self.image2_api_base, keys, self.image2_model
+        keys = self._build_key_chain(self.api_key, self.backup_api_keys)
+        if not keys:
             return (
                 "未配置 NewAPI Key，请在 AstrBot WebUI 的 Hajimi 图片生成插件配置中填写 api_key。"
             )
-        return self.api_base, self.api_key, self.model
+        return self.api_base, keys, self.model
 
     @filter.command("hajimi", alias={"kkt", "image2"})
     async def handle_command(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
@@ -660,7 +730,7 @@ class KktImagePlugin(Star):
             logger.error("[kkt] 凭证未配置: command=%s", command)
             yield event.plain_result(creds)
             return
-        api_base, api_key, model = creds
+        api_base, api_keys, model = creds
 
         # per-user CD（管理员跳过）
         cd_msg = self._check_user_cooldown(event)
@@ -682,19 +752,23 @@ class KktImagePlugin(Star):
 
         try:
             logger.info(
-                "[kkt] 开始调用图像 API: command=%s model=%s image_count=%d label_images=%s",
+                "[kkt] 开始调用图像 API: command=%s model=%s key_count=%d "
+                "image_count=%d label_images=%s image2_mode=%s",
                 command,
                 model,
+                len(api_keys),
                 len(image_items),
                 self.label_images,
+                self.image2_api_mode if command == "image2" else "n/a",
             )
             result = await self._request_image(
                 prompt,
                 image_items,
                 event,
                 api_base=api_base,
-                api_key=api_key,
+                api_keys=api_keys,
                 model=model,
+                command=command,
             )
             if not result:
                 logger.error("[kkt] API 调用完成但未解析出图片")
@@ -936,6 +1010,55 @@ class KktImagePlugin(Star):
                 )
         return content
 
+    def _should_use_images_api(self, command: str, model: str) -> bool:
+        """仅 /image2 可能走 images API；/kkt /hajimi 始终 chat。"""
+        if command != "image2":
+            return False
+        mode = self.image2_api_mode
+        if mode == "images":
+            return True
+        if mode == "chat":
+            return False
+        # auto：按模型名猜测（gpt-image / dall-e 走 images）
+        name = (model or "").lower()
+        return any(
+            token in name
+            for token in (
+                "gpt-image",
+                "dall-e",
+                "dalle",
+                "imagen",  # 少数中转也挂在 images
+            )
+        )
+
+    @staticmethod
+    def _data_url_to_bytes(data_url: str) -> tuple[bytes, str, str]:
+        """返回 (raw_bytes, mime, filename_suffix)。"""
+        text = (data_url or "").strip()
+        if not text.startswith("data:"):
+            raise RuntimeError("参考图不是 data URL，无法提交到 images/edits")
+        header, encoded = text.split(",", 1)
+        mime = "image/png"
+        if ";" in header:
+            mime = header[5:].split(";", 1)[0] or mime
+        elif header.startswith("data:"):
+            mime = header[5:] or mime
+        ext = {
+            "image/jpeg": "jpg",
+            "image/jpg": "jpg",
+            "image/png": "png",
+            "image/webp": "webp",
+            "image/gif": "gif",
+        }.get(mime.lower(), "png")
+        return base64.b64decode(encoded), mime, ext
+
+    def _compose_images_prompt(self, prompt: str) -> str:
+        """images API 用纯文本 prompt（可带 style 软约束）。"""
+        body = (prompt or "").strip() or "请生成一张图片"
+        if self.style_prompt:
+            return f"{self.style_prompt}\n\n用户指令：{body}"
+        return body
+
     async def _request_image(
         self,
         prompt: str,
@@ -944,108 +1067,427 @@ class KktImagePlugin(Star):
         *,
         api_base: str | None = None,
         api_key: str | None = None,
+        api_keys: list[str] | None = None,
         model: str | None = None,
+        command: str = "kkt",
     ) -> str | None:
-        content = self._build_multimodal_content(prompt, image_items, event)
-        image_count = sum(
-            1 for part in content if isinstance(part, dict) and part.get("type") == "image_url"
+        use_base = (api_base or self.api_base).rstrip("/")
+        use_model = model or self.model
+        key_chain = self._build_key_chain(
+            "",
+            list(api_keys or []) + ([api_key] if api_key else []),
+        )
+        if not key_chain:
+            # 仅作为兜底：正常路径应已由 _resolve_api_credentials 给出 keys
+            if command == "image2":
+                key_chain = self._build_key_chain(
+                    self.image2_api_key, self.image2_backup_api_keys
+                )
+            else:
+                key_chain = self._build_key_chain(self.api_key, self.backup_api_keys)
+        if not key_chain:
+            raise RuntimeError("未配置可用 API Key")
+
+        # 关键隔离：只有 image2 且配置/模型需要时才走 images API
+        if self._should_use_images_api(command, use_model):
+            return await self._request_image_via_images_api(
+                prompt,
+                image_items,
+                api_base=use_base,
+                api_keys=key_chain,
+                model=use_model,
+            )
+        return await self._request_image_via_chat(
+            prompt,
+            image_items,
+            event,
+            api_base=use_base,
+            api_keys=key_chain,
+            model=use_model,
         )
 
-        use_base = (api_base or self.api_base).rstrip("/")
-        use_key = api_key if api_key is not None else self.api_key
-        use_model = model or self.model
+    async def _request_image_via_images_api(
+        self,
+        prompt: str,
+        image_items: list[dict],
+        *,
+        api_base: str,
+        api_keys: list[str],
+        model: str,
+    ) -> str | None:
+        """/image2 专用：文生图 generations，图生图 edits。不影响 /kkt。"""
+        use_base = api_base.rstrip("/")
+        text_prompt = self._compose_images_prompt(prompt)
+        has_ref = bool(image_items)
+        if has_ref and len(image_items) > 1:
+            logger.warning(
+                "[kkt] image2/images 多图仅使用第 1 张: total=%d labels=%s",
+                len(image_items),
+                [item.get("label") for item in image_items][:6],
+            )
+
+        endpoint = (
+            f"{use_base}/images/edits"
+            if has_ref
+            else f"{use_base}/images/generations"
+        )
+        last_error = "未知错误"
+        logger.info(
+            "[kkt] image2 images 请求准备: endpoint=%s model=%s key_count=%d "
+            "ref_images=%d prompt_length=%d size=%s",
+            endpoint,
+            model,
+            len(api_keys),
+            len(image_items),
+            len(text_prompt),
+            self.image2_size,
+        )
+
+        ref_bytes = ref_mime = ref_ext = None
+        if has_ref:
+            ref_bytes, ref_mime, ref_ext = self._data_url_to_bytes(
+                str(image_items[0].get("data_url") or "")
+            )
+
+        for key_index, use_key in enumerate(api_keys):
+            key_label = "primary" if key_index == 0 else f"backup#{key_index}"
+            key_mask = self._mask_secret(use_key)
+            logger.info(
+                "[kkt] image2 使用 Key: index=%d/%d role=%s mask=%s",
+                key_index + 1,
+                len(api_keys),
+                key_label,
+                key_mask,
+            )
+            for attempt in range(self.max_retry + 1):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=self.timeout)
+                    headers = {"Authorization": f"Bearer {use_key}"}
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        logger.info(
+                            "[kkt] image2 API 发送: key=%s attempt=%d/%d endpoint=%s",
+                            key_label,
+                            attempt + 1,
+                            self.max_retry + 1,
+                            endpoint,
+                        )
+                        if has_ref:
+                            form = aiohttp.FormData()
+                            form.add_field("model", model)
+                            form.add_field("prompt", text_prompt)
+                            form.add_field("n", "1")
+                            if self.image2_size:
+                                form.add_field("size", self.image2_size)
+                            form.add_field(
+                                "image",
+                                ref_bytes,
+                                filename=f"input.{ref_ext}",
+                                content_type=ref_mime or "image/png",
+                            )
+                            # 部分兼容层同时认 image[] / response_format
+                            form.add_field("response_format", "b64_json")
+                            post_cm = session.post(endpoint, headers=headers, data=form)
+                        else:
+                            payload = {
+                                "model": model,
+                                "prompt": text_prompt,
+                                "n": 1,
+                            }
+                            if self.image2_size:
+                                payload["size"] = self.image2_size
+                            # 优先要 base64，避免临时 URL 过期；不支持时上游会忽略
+                            payload["response_format"] = "b64_json"
+                            headers = {
+                                **headers,
+                                "Content-Type": "application/json",
+                            }
+                            post_cm = session.post(
+                                endpoint, headers=headers, json=payload
+                            )
+
+                        async with post_cm as response:
+                            raw = await response.text()
+                            logger.info(
+                                "[kkt] image2 API 响应: key=%s attempt=%d status=%d bytes=%d",
+                                key_label,
+                                attempt + 1,
+                                response.status,
+                                len(raw),
+                            )
+                            image, err = self._handle_images_http_response(
+                                response.status, raw
+                            )
+                            if image:
+                                logger.info(
+                                    "[kkt] image2 图片解析成功: key=%s source=%s",
+                                    key_label,
+                                    "data_url" if image.startswith("data:") else "url",
+                                )
+                                return image
+                            last_error = err or "API 响应中未找到图片"
+                            raise RuntimeError(last_error)
+                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                    last_error = str(exc)
+                    logger.error(
+                        "[kkt] image2 API 失败: key=%s attempt=%d error=%s",
+                        key_label,
+                        attempt + 1,
+                        last_error[:300],
+                    )
+                    no_retry = self._is_non_retryable_api_error(last_error)
+                    switch_key = self._should_switch_api_key(last_error)
+                    if no_retry and not switch_key:
+                        raise RuntimeError(last_error) from exc
+                    if switch_key:
+                        break
+                    if attempt < self.max_retry and not no_retry:
+                        await asyncio.sleep(self.retry_delay)
+                        continue
+                    break
+
+            if key_index + 1 < len(api_keys):
+                logger.warning(
+                    "[kkt] image2 切换备用 Key: from=%s next_index=%d/%d last_error=%s",
+                    key_label,
+                    key_index + 2,
+                    len(api_keys),
+                    last_error[:200],
+                )
+                if self.retry_delay > 0:
+                    await asyncio.sleep(self.retry_delay)
+                continue
+            raise RuntimeError(last_error)
+        return None
+
+    def _handle_images_http_response(
+        self, status: int, raw: str
+    ) -> tuple[str | None, str | None]:
+        """解析 images/* HTTP 响应；返回 (image, error_message)。"""
+        if status in {401, 403}:
+            return None, "API Key 无效或没有模型权限"
+        if status == 429:
+            return None, "API 请求频率或额度受限"
+        if status >= 500:
+            detail = (raw or "")[:220].replace("\n", " ")
+            return None, (
+                f"上游服务异常 HTTP {status}: {detail}"
+                if detail
+                else f"上游服务异常 HTTP {status}"
+            )
+        if status >= 400:
+            return None, f"API 请求失败 HTTP {status}: {(raw or '')[:200]}"
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, f"API 返回非 JSON：{(raw or '')[:200]}"
+        image = self._extract_image(data)
+        if image:
+            return image, None
+        # images 错误体有时 200 包 error
+        if isinstance(data, dict) and data.get("error"):
+            err = data.get("error")
+            if isinstance(err, dict):
+                msg = str(err.get("message") or err)
+            else:
+                msg = str(err)
+            return None, f"上游返回错误：{msg[:300]}"
+        return None, "API 响应中未找到图片"
+
+    @staticmethod
+    def _is_non_retryable_api_error(message: str) -> bool:
+        text = message or ""
+        return (
+            "Key 无效" in text
+            or "权限" in text
+            or "模型未返回图片，而是回复了文字" in text
+            or "only supported on" in text.lower()
+            or "不支持" in text
+        )
+
+    @staticmethod
+    def _should_switch_api_key(message: str) -> bool:
+        text = (message or "").lower()
+        # 认证失败 / 无渠道 / 额度：切备用 Key 更有意义
+        return (
+            "key 无效" in (message or "")
+            or "权限" in (message or "")
+            or "no available channel" in text
+            or "model_not_found" in text
+            or "额度" in (message or "")
+            or "429" in text
+            or "频率" in (message or "")
+        )
+
+    async def _request_image_via_chat(
+        self,
+        prompt: str,
+        image_items: list[dict],
+        event: AstrMessageEvent | None = None,
+        *,
+        api_base: str,
+        api_keys: list[str],
+        model: str,
+    ) -> str | None:
+        """原 chat/completions 路径：供 /kkt /hajimi，以及 image2_mode=chat 使用。"""
+        content = self._build_multimodal_content(prompt, image_items, event)
+        image_count = sum(
+            1
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        )
+
+        use_base = api_base.rstrip("/")
+        use_model = model
+        key_chain = list(api_keys)
         payload = {
             "model": use_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": self.temperature,
         }
-        headers = {
-            "Authorization": f"Bearer {use_key}",
-            "Content-Type": "application/json",
-        }
         endpoint = f"{use_base}/chat/completions"
         last_error = "未知错误"
         logger.debug(
-            "[kkt] 请求准备完成: endpoint=%s model=%s prompt_length=%d image_count=%d content_parts=%d payload_bytes≈%d",
+            "[kkt] chat 请求准备: endpoint=%s model=%s key_count=%d "
+            "prompt_length=%d image_count=%d content_parts=%d payload_bytes≈%d",
             endpoint,
             use_model,
+            len(key_chain),
             len(prompt),
             image_count,
             len(content),
             len(json.dumps(payload, ensure_ascii=False)),
         )
 
-        for attempt in range(self.max_retry + 1):
-            try:
-                timeout = aiohttp.ClientTimeout(total=self.timeout)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    logger.info("[kkt] API 请求发送: attempt=%d/%d", attempt + 1, self.max_retry + 1)
-                    async with session.post(endpoint, headers=headers, json=payload) as response:
-                        raw = await response.text()
+        for key_index, use_key in enumerate(key_chain):
+            key_label = "primary" if key_index == 0 else f"backup#{key_index}"
+            key_mask = self._mask_secret(use_key)
+            headers = {
+                "Authorization": f"Bearer {use_key}",
+                "Content-Type": "application/json",
+            }
+            logger.info(
+                "[kkt] 使用 Key: index=%d/%d role=%s mask=%s",
+                key_index + 1,
+                len(key_chain),
+                key_label,
+                key_mask,
+            )
+            key_failed_hard = False
+            for attempt in range(self.max_retry + 1):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=self.timeout)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
                         logger.info(
-                            "[kkt] API 响应: attempt=%d status=%d bytes=%d",
+                            "[kkt] API 请求发送: key=%s attempt=%d/%d",
+                            key_label,
                             attempt + 1,
-                            response.status,
-                            len(raw),
+                            self.max_retry + 1,
                         )
-                        if response.status in {401, 403}:
-                            raise RuntimeError("API Key 无效或没有模型权限")
-                        if response.status == 429:
-                            last_error = "API 请求频率或额度受限"
-                            raise RuntimeError(last_error)
-                        if response.status >= 500:
-                            last_error = f"上游服务异常 HTTP {response.status}"
-                            raise RuntimeError(last_error)
-                        if response.status >= 400:
-                            raise RuntimeError(f"API 请求失败 HTTP {response.status}: {raw[:200]}")
-                        try:
-                            data = json.loads(raw)
-                        except json.JSONDecodeError as exc:
-                            raise RuntimeError(f"API 返回非 JSON：{raw[:200]}") from exc
-                        image = self._extract_image(data)
-                        if image:
+                        async with session.post(
+                            endpoint, headers=headers, json=payload
+                        ) as response:
+                            raw = await response.text()
                             logger.info(
-                                "[kkt] API 图片解析成功: source=%s",
-                                "data_url" if image.startswith("data:") else "url",
+                                "[kkt] API 响应: key=%s attempt=%d status=%d bytes=%d",
+                                key_label,
+                                attempt + 1,
+                                response.status,
+                                len(raw),
                             )
-                            return image
-                        text_reply = self._extract_text_reply(data)
-                        finish = self._extract_finish_reason(data)
-                        logger.error(
-                            "[kkt] API JSON 未找到图片: top_keys=%s choices=%d "
-                            "finish_reason=%s text_preview=%r raw_preview=%r",
-                            list(data)[:20] if isinstance(data, dict) else type(data).__name__,
-                            len(data.get("choices", [])) if isinstance(data, dict) else 0,
-                            finish,
-                            (text_reply or "")[:300],
-                            raw[:300],
-                        )
-                        # 模型只回了文字（审核/拒答/中转丢图）：有文本则直接转给用户，不再无意义重试
-                        if text_reply:
+                            if response.status in {401, 403}:
+                                last_error = "API Key 无效或没有模型权限"
+                                key_failed_hard = True
+                                raise RuntimeError(last_error)
+                            if response.status == 429:
+                                last_error = "API 请求频率或额度受限"
+                                raise RuntimeError(last_error)
+                            if response.status >= 500:
+                                detail = raw[:220].replace("\n", " ")
+                                last_error = (
+                                    f"上游服务异常 HTTP {response.status}: {detail}"
+                                    if detail
+                                    else f"上游服务异常 HTTP {response.status}"
+                                )
+                                raise RuntimeError(last_error)
+                            if response.status >= 400:
+                                raise RuntimeError(
+                                    f"API 请求失败 HTTP {response.status}: {raw[:200]}"
+                                )
+                            try:
+                                data = json.loads(raw)
+                            except json.JSONDecodeError as exc:
+                                raise RuntimeError(
+                                    f"API 返回非 JSON：{raw[:200]}"
+                                ) from exc
+                            image = self._extract_image(data)
+                            if image:
+                                logger.info(
+                                    "[kkt] API 图片解析成功: key=%s source=%s",
+                                    key_label,
+                                    "data_url" if image.startswith("data:") else "url",
+                                )
+                                return image
+                            text_reply = self._extract_text_reply(data)
+                            finish = self._extract_finish_reason(data)
+                            logger.error(
+                                "[kkt] API JSON 未找到图片: key=%s top_keys=%s choices=%d "
+                                "finish_reason=%s text_preview=%r raw_preview=%r",
+                                key_label,
+                                list(data)[:20]
+                                if isinstance(data, dict)
+                                else type(data).__name__,
+                                len(data.get("choices", []))
+                                if isinstance(data, dict)
+                                else 0,
+                                finish,
+                                (text_reply or "")[:300],
+                                raw[:300],
+                            )
+                            if text_reply:
+                                raise RuntimeError(
+                                    f"模型未返回图片，而是回复了文字：{text_reply[:400]}"
+                                )
                             raise RuntimeError(
-                                f"模型未返回图片，而是回复了文字：{text_reply[:400]}"
+                                "API 响应中未找到图片"
+                                + (f"（finish_reason={finish}）" if finish else "")
                             )
-                        raise RuntimeError(
-                            "API 响应中未找到图片"
-                            + (f"（finish_reason={finish}）" if finish else "")
-                        )
-            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
-                last_error = str(exc)
-                logger.error(
-                    "[kkt] API 请求失败: attempt=%d error=%s",
-                    attempt + 1,
-                    last_error[:300],
+                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                    last_error = str(exc)
+                    logger.error(
+                        "[kkt] API 请求失败: key=%s attempt=%d error=%s",
+                        key_label,
+                        attempt + 1,
+                        last_error[:300],
+                    )
+                    if "模型未返回图片，而是回复了文字" in last_error:
+                        raise RuntimeError(last_error) from exc
+                    if key_failed_hard or self._should_switch_api_key(last_error):
+                        # no channel / 401 等：不必在同 Key 内耗完重试
+                        if (
+                            "no available channel" in last_error.lower()
+                            or "model_not_found" in last_error.lower()
+                            or key_failed_hard
+                        ):
+                            break
+                    if attempt < self.max_retry and not self._is_non_retryable_api_error(
+                        last_error
+                    ):
+                        await asyncio.sleep(self.retry_delay)
+                        continue
+                    break
+
+            if key_index + 1 < len(key_chain):
+                logger.warning(
+                    "[kkt] 主/当前 Key 失败，切换备用 Key: from=%s next_index=%d/%d last_error=%s",
+                    key_label,
+                    key_index + 2,
+                    len(key_chain),
+                    last_error[:200],
                 )
-                # 认证失败 / 模型明确用文字拒答：不再重试
-                no_retry = (
-                    "Key 无效" in last_error
-                    or "权限" in last_error
-                    or "模型未返回图片，而是回复了文字" in last_error
-                )
-                if attempt < self.max_retry and not no_retry:
+                if self.retry_delay > 0:
                     await asyncio.sleep(self.retry_delay)
-                    continue
-                raise RuntimeError(last_error) from exc
+                continue
+            raise RuntimeError(last_error)
         return None
 
     @staticmethod

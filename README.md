@@ -18,6 +18,8 @@ https://newapi.qianqianye.com/v1/chat/completions
 - 固定命令：`/hajimi` 和 `/kkt`，两者都可以触发插件。
 - 群聊黑名单：黑名单群不会响应，也不会调用图像 API。
 - 异步请求、失败重试和临时文件自动清理。
+- Key 轮询：主 Key 失败后按顺序切换备用 Key（`/hajimi` `/kkt` 与 `/image2` 各自独立）。
+- `/image2` 默认走 OpenAI Images API：文生图 `/images/generations`，有参考图时 `/images/edits`（与 `/kkt` 的 chat 路径隔离）。
 
 ## 安装
 
@@ -45,8 +47,30 @@ astrbot_plugin_kkt/
 首次使用前，在 AstrBot WebUI 的插件配置中填写：
 
 ```text
-api_key = 你的 NewAPI API Key
+api_key = 你的 NewAPI 主 API Key
 ```
+
+可选：填写备用 Key 列表，主 Key 失败后自动轮询：
+
+```text
+backup_api_keys = ["备用Key1", "备用Key2"]
+```
+
+`/image2` 通道独立配置：
+
+```text
+image2_api_key = image2 主 Key
+image2_backup_api_keys = ["image2备用Key1"]
+image2_api_mode = images          # images | chat | auto
+image2_model = gpt-image-2
+image2_size = 1024x1024
+```
+
+说明：
+
+- `image2_api_mode=images`（默认）：无参考图 → `/v1/images/generations`；有参考图 → `/v1/images/edits`（默认只用第 1 张）
+- `image2_api_mode=chat`：与 `/kkt` 一样走 `chat/completions`（仅当你的 image2 模型支持 chat 出图时）
+- `/hajimi` `/kkt` **始终**走 `chat/completions`，不受 `image2_api_mode` 影响
 
 默认配置：
 
@@ -56,13 +80,21 @@ model = gemini-3.1-flash-image
 temperature = 0.7
 ```
 
-也可以通过环境变量提供 API Key：
+也可以通过环境变量提供主 API Key：
 
 ```text
 NEW_API_KEY
 ```
 
-插件配置中的 `api_key` 优先级更高。API Key 不会写入日志。
+插件配置中的 `api_key` 优先级更高。日志里只会打印 Key 掩码（如 `sk-0gb...YsQh`），不会输出完整密钥。
+
+### Key 轮询策略
+
+1. 先用主 Key（`api_key` 或 `image2_api_key`）。
+2. 同一 Key 内按 `max_retry` 重试网络错误 / 429 / 5xx。
+3. 当前 Key 仍失败（含 401/403/429/5xx、上游 no channel）时，切换下一个备用 Key。
+4. 模型明确用文字拒答时不再切换 Key（避免无意义消耗）。
+5. 所有 Key 都失败后，把最后一次错误返回给用户。
 
 ## 指令格式
 
