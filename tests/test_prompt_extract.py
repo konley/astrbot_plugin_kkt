@@ -413,6 +413,7 @@ def test_rewrite_prompt_at_and_image_num():
 def test_build_multimodal_content_interleaved():
     plugin = object.__new__(Plugin)
     plugin.label_images = True
+    plugin.style_prompt = ""
     items = [
         {
             "index": 1,
@@ -489,3 +490,26 @@ def test_extract_image_from_images_field_and_b64():
         ]
     }
     assert "a.png" in (Plugin._extract_image(data2) or "")
+
+
+def test_compose_user_instruction_chinese_style():
+    plugin = object.__new__(Plugin)
+    plugin.style_prompt = "【画面文字语言】默认简体中文"
+    text = plugin._compose_user_instruction("画一只猫")
+    assert "简体中文" in text
+    assert "画一只猫" in text
+    assert "用户指令" in text
+
+    plugin.style_prompt = ""
+    text2 = plugin._compose_user_instruction("画一只猫")
+    assert text2.startswith("用户指令") or "画一只猫" in text2
+
+
+def test_build_content_includes_style_prompt():
+    plugin = object.__new__(Plugin)
+    plugin.label_images = False
+    plugin.style_prompt = "【画面文字语言】默认简体中文"
+    content = plugin._build_multimodal_content("生成四格漫画", [])
+    assert any(
+        c.get("type") == "text" and "简体中文" in c.get("text", "") for c in content
+    )

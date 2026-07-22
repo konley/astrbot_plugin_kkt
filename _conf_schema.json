@@ -65,6 +65,18 @@
     "default": true,
     "hint": "开启后按【图1·引用原图】【图2·@头像】交错发送，并把 @xx/图片N 改写成图N，帮助模型理解先后与角色对应"
   },
+  "prefer_chinese_text": {
+    "description": "图内文字默认中文",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后预制提示词要求气泡/标题/旁白/音效等默认用简体中文；品牌名/专有名词或用户明确要求时可用英文"
+  },
+  "style_prompt": {
+    "description": "额外预制提示词",
+    "type": "text",
+    "default": "",
+    "hint": "追加到每次请求的风格/约束（在中文约束之后）。例如：二次元、不要水印、竖版构图"
+  },
   "reply_with_quote": {
     "description": "出图时引用原指令",
     "type": "bool",

@@ -36,7 +36,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.6",
+    "0.3.7",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -88,6 +88,21 @@ class KktImagePlugin(Star):
         self.reaction_emoji_type = "1"
         # 多图时用【图N】标签交错说明，帮助模型对齐角色/物体
         self.label_images = bool(config.get("label_images", True))
+        # 默认中文：气泡/标题/旁白等图内文字优先中文
+        self.prefer_chinese_text = bool(config.get("prefer_chinese_text", True))
+        default_style = (
+            "【画面文字语言】图中所有可读文字默认使用简体中文，包括但不限于："
+            "对话气泡、旁白、标题、字幕、招牌、UI 文案、音效拟声（如「咔咔」「叮」）。"
+            "仅当用户明确要求英文/其他语言，或品牌名、游戏名、专有名词本身必须保留原文时，才使用非中文。"
+            "不要无故把中文提示画成全英文漫画分镜文案。"
+        )
+        custom_style = str(config.get("style_prompt", "") or "").strip()
+        if self.prefer_chinese_text and custom_style:
+            self.style_prompt = f"{default_style}\n{custom_style}".strip()
+        elif self.prefer_chinese_text:
+            self.style_prompt = default_style
+        else:
+            self.style_prompt = custom_style
         # 防刷：每用户独立 CD（秒）；0=关闭；管理员不受限
         self.cooldown_seconds = max(0, int(config.get("cooldown_seconds", 15)))
         # 单日全服总调用次数上限；0=不限制；超出后仅管理员可继续
@@ -103,7 +118,8 @@ class KktImagePlugin(Star):
         logger.info(
             "[kkt] 插件已加载: commands=/hajimi,/kkt blacklist_count=%d model=%s "
             "endpoint=%s reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
-            "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s",
+            "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s "
+            "prefer_chinese_text=%s style_prompt_len=%d",
             len(self.group_blacklist),
             self.model,
             f"{self.api_base}/chat/completions",
@@ -114,6 +130,8 @@ class KktImagePlugin(Star):
             self.daily_quota,
             self.enable_at_avatar,
             self.label_images,
+            self.prefer_chinese_text,
+            len(self.style_prompt),
         )
         self._cleanup_stale_files()
 
@@ -663,6 +681,13 @@ class KktImagePlugin(Star):
                 )
         return text
 
+    def _compose_user_instruction(self, prompt: str) -> str:
+        """用户指令 + 可选预制风格/中文约束。"""
+        body = (prompt or "").strip() or "请生成一张图片"
+        if self.style_prompt:
+            return f"{self.style_prompt}\n\n用户指令：{body}"
+        return f"用户指令：{body}" if prompt else body
+
     def _build_multimodal_content(
         self,
         prompt: str,
@@ -677,6 +702,7 @@ class KktImagePlugin(Star):
 
         content: list[dict] = []
         use_labels = self.label_images and len(image_items) >= 1
+        instruction = self._compose_user_instruction(rewritten)
 
         if use_labels and image_items:
             content.append(
@@ -697,16 +723,9 @@ class KktImagePlugin(Star):
                         "image_url": {"url": item["data_url"]},
                     }
                 )
-            final_prompt = rewritten or "请根据以上参考图生成一张图片"
-            content.append(
-                {
-                    "type": "text",
-                    "text": f"用户指令：{final_prompt}",
-                }
-            )
+            content.append({"type": "text", "text": instruction})
         else:
-            if rewritten:
-                content.append({"type": "text", "text": rewritten})
+            content.append({"type": "text", "text": instruction})
             for item in image_items:
                 content.append(
                     {
@@ -714,8 +733,6 @@ class KktImagePlugin(Star):
                         "image_url": {"url": item["data_url"]},
                     }
                 )
-            if not content:
-                content.append({"type": "text", "text": "请生成一张图片"})
         return content
 
     async def _request_image(
