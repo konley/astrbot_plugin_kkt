@@ -183,11 +183,34 @@ Plugin = kkt.KktImagePlugin
 def test_cmd_arg_regex_basic():
     assert Plugin._command_arg_from_text("/kkt 一只猫") == "一只猫"
     assert Plugin._command_arg_from_text("/hajimi 一只猫") == "一只猫"
+    assert Plugin._command_arg_from_text("/image2 一只猫") == "一只猫"
     assert Plugin._command_arg_from_text("kkt 一只猫") == "一只猫"
     assert Plugin._command_arg_from_text("/kkt帮助") == ""
     assert Plugin._command_arg_from_text("/kkt help") == "help"
+    assert Plugin._command_arg_from_text("/image2 help") == "help"
     assert Plugin._command_arg_from_text("/kkt?") == ""
     assert Plugin._command_arg_from_text("/kkt ?") == "?"
+
+
+def test_resolve_api_credentials_image2_requires_own_key():
+    plugin = object.__new__(Plugin)
+    plugin.api_base = "https://example.com/v1"
+    plugin.api_key = "default-key"
+    plugin.model = "gemini-x"
+    plugin.image2_api_base = "https://example.com/v1"
+    plugin.image2_api_key = ""
+    plugin.image2_model = "gpt-image-2"
+    err = plugin._resolve_api_credentials("image2")
+    assert isinstance(err, str) and "image2" in err.lower()
+
+    plugin.image2_api_key = "image2-only-key"
+    base, key, model = plugin._resolve_api_credentials("image2")
+    assert key == "image2-only-key"
+    assert model == "gpt-image-2"
+    # 默认通道不碰 image2 key
+    base2, key2, model2 = plugin._resolve_api_credentials("kkt")
+    assert key2 == "default-key"
+    assert model2 == "gemini-x"
 
 
 def test_strip_at_tokens():

@@ -12,16 +12,34 @@
     "hint": "通常保持默认值，不要填写 /chat/completions"
   },
   "api_key": {
-    "description": "NewAPI API Key",
+    "description": "NewAPI API Key（/hajimi /kkt）",
     "type": "string",
     "default": "",
-    "hint": "在令牌页面生成；仅保存在 AstrBot 插件配置中"
+    "hint": "默认通道密钥；/hajimi 与 /kkt 使用。不会用于 /image2"
   },
   "model": {
-    "description": "图像模型",
+    "description": "图像模型（/hajimi /kkt）",
     "type": "string",
     "default": "gemini-3.1-flash-image",
-    "hint": "默认使用 gemini-3.1-flash-image"
+    "hint": "默认通道模型，例如 gemini-3.1-flash-image"
+  },
+  "image2_api_key": {
+    "description": "image2 专用 API Key",
+    "type": "string",
+    "default": "",
+    "hint": "仅 /image2 使用，必须单独配置；不会回退到上面的 api_key"
+  },
+  "image2_model": {
+    "description": "image2 模型",
+    "type": "string",
+    "default": "gpt-image-2",
+    "hint": "/image2 指令使用的模型名，默认 gpt-image-2"
+  },
+  "image2_api_base": {
+    "description": "image2 API 基址（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则与 api_base 相同；一般无需填写 /chat/completions"
   },
   "temperature": {
     "description": "Temperature",

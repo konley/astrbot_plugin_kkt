@@ -26,10 +26,11 @@ def build_help_text() -> str:
     return (
         "Hajimi 图片生成\n"
         "用法：/hajimi <提示词> 或 /kkt <提示词>\n"
-        "回复图片后：/hajimi <编辑提示词> 或 /kkt <编辑提示词>\n"
+        "image2：/image2 <提示词>（独立模型与 API Key）\n"
+        "回复图片后：/hajimi <编辑提示词> 或 /kkt <编辑提示词> 或 /image2 <编辑提示词>\n"
         "限额查询：/kkt额度 或 /kktquota 或 /hajimi额度\n"
         "重置今日限额（仅管理员）：/kkt重置额度 或 /kktresetquota\n"
-        "帮助：/hajimi help 或 /kkt help\n"
+        "帮助：/hajimi help 或 /kkt help 或 /image2 help\n"
         "支持文生图、回复图片编辑和 @用户头像参考图。"
     )
 
@@ -38,14 +39,14 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.9",
+    "0.4.0",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
 
-    # 匹配指令名后的参数；支持 /kkt帮助、/kkt help、/kkt ?
+    # 匹配指令名后的参数；支持 /kkt帮助、/image2 help 等
     _CMD_ARG_RE = re.compile(
-        r"^/?(?:hajimi|kkt)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
+        r"^/?(?:hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
         re.IGNORECASE | re.DOTALL,
     )
     # AstrBot 把 At 序列化成 @昵称 或 @昵称(QQ号) 时用于剔除
@@ -70,6 +71,14 @@ class KktImagePlugin(Star):
             "NEW_API_KEY", ""
         ).strip()
         self.model = str(config.get("model", "gemini-3.1-flash-image")).strip()
+        # /image2 独立通道：模型 + Key（Key 必填独立；未配置则 image2 不可用）
+        self.image2_model = str(
+            config.get("image2_model", "gpt-image-2")
+        ).strip() or "gpt-image-2"
+        self.image2_api_key = str(config.get("image2_api_key", "") or "").strip()
+        # 可选：image2 用不同基址，空则复用 api_base
+        image2_base = str(config.get("image2_api_base", "") or "").strip().rstrip("/")
+        self.image2_api_base = image2_base or self.api_base
         self.temperature = max(0.0, min(2.0, float(config.get("temperature", 0.7))))
         self.timeout = max(10, int(config.get("timeout", 180)))
         self.max_retry = max(0, min(5, int(config.get("max_retry", 2))))
@@ -130,13 +139,17 @@ class KktImagePlugin(Star):
         self._quota_lock = asyncio.Lock()
         self._help_text = build_help_text()
         logger.info(
-            "[kkt] 插件已加载: commands=/hajimi,/kkt blacklist_count=%d model=%s "
-            "endpoint=%s reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
+            "[kkt] 插件已加载: commands=/hajimi,/kkt,/image2 blacklist_count=%d "
+            "model=%s image2_model=%s image2_key=%s endpoint=%s image2_endpoint=%s "
+            "reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
             "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s "
             "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d",
             len(self.group_blacklist),
             self.model,
+            self.image2_model,
+            "set" if self.image2_api_key else "missing",
             f"{self.api_base}/chat/completions",
+            f"{self.image2_api_base}/chat/completions",
             self.reply_with_quote,
             self.reaction_emoji_enabled,
             len(self.reaction_emoji_list),
@@ -533,17 +546,57 @@ class KktImagePlugin(Star):
         )
         yield event.plain_result(text)
 
-    @filter.command("hajimi", alias={"kkt"})
+    def _detect_command_name(self, event: AstrMessageEvent) -> str:
+        """从消息中识别触发的主指令名（hajimi / kkt / image2）。"""
+        raw = (event.get_message_str() or "").strip()
+        first = raw.split()[0] if raw.split() else ""
+        first = first.lstrip("/").lower()
+        if first.startswith("image2"):
+            return "image2"
+        if first.startswith("kkt"):
+            return "kkt"
+        if first.startswith("hajimi"):
+            return "hajimi"
+        # 兜底：Plain 拼接
+        plain = "".join(
+            getattr(c, "text", "") or ""
+            for c in event.get_messages()
+            if isinstance(c, Comp.Plain)
+        ).strip()
+        token = plain.split()[0].lstrip("/").lower() if plain.split() else ""
+        if token.startswith("image2"):
+            return "image2"
+        if token.startswith("kkt"):
+            return "kkt"
+        return "hajimi"
+
+    def _resolve_api_credentials(self, command: str) -> tuple[str, str, str] | str:
+        """返回 (api_base, api_key, model)；失败返回错误文案。"""
+        if command == "image2":
+            if not self.image2_api_key:
+                return (
+                    "未配置 image2 专用 API Key。请在插件配置中填写 image2_api_key"
+                    "（不会使用默认 api_key）。"
+                )
+            return self.image2_api_base, self.image2_api_key, self.image2_model
+        if not self.api_key:
+            return (
+                "未配置 NewAPI Key，请在 AstrBot WebUI 的 Hajimi 图片生成插件配置中填写 api_key。"
+            )
+        return self.api_base, self.api_key, self.model
+
+    @filter.command("hajimi", alias={"kkt", "image2"})
     async def handle_command(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             logger.debug("[kkt] 忽略黑名单群消息: group_id=%s", group_id)
             return
 
+        command = self._detect_command_name(event)
         prompt = self._extract_prompt(event, prompt)
         logger.info(
             "[kkt] 指令匹配: command=%s prompt=%r",
-            event.get_message_str().split()[0] if event.get_message_str().split() else "",
+            command,
             prompt[:200],
         )
         event.stop_event()
@@ -591,7 +644,8 @@ class KktImagePlugin(Star):
             prompt = ""
 
         logger.info(
-            "[kkt] 输入解析完成: prompt_length=%d image_count=%d quoted_prompt=%s labels=%s",
+            "[kkt] 输入解析完成: command=%s prompt_length=%d image_count=%d quoted_prompt=%s labels=%s",
+            command,
             len(prompt),
             len(image_items),
             bool(quoted_prompt),
@@ -601,12 +655,12 @@ class KktImagePlugin(Star):
             yield event.plain_result(self._help_text)
             return
 
-        if not self.api_key:
-            logger.error("[kkt] 未配置 API Key")
-            yield event.plain_result(
-                "未配置 NewAPI Key，请在 AstrBot WebUI 的 Hajimi 图片生成插件配置中填写 api_key。"
-            )
+        creds = self._resolve_api_credentials(command)
+        if isinstance(creds, str):
+            logger.error("[kkt] 凭证未配置: command=%s", command)
+            yield event.plain_result(creds)
             return
+        api_base, api_key, model = creds
 
         # per-user CD（管理员跳过）
         cd_msg = self._check_user_cooldown(event)
@@ -628,12 +682,20 @@ class KktImagePlugin(Star):
 
         try:
             logger.info(
-                "[kkt] 开始调用图像 API: model=%s image_count=%d label_images=%s",
-                self.model,
+                "[kkt] 开始调用图像 API: command=%s model=%s image_count=%d label_images=%s",
+                command,
+                model,
                 len(image_items),
                 self.label_images,
             )
-            result = await self._request_image(prompt, image_items, event)
+            result = await self._request_image(
+                prompt,
+                image_items,
+                event,
+                api_base=api_base,
+                api_key=api_key,
+                model=model,
+            )
             if not result:
                 logger.error("[kkt] API 调用完成但未解析出图片")
                 yield event.plain_result("API 返回中没有找到图片，请检查模型和接口响应格式。")
@@ -879,27 +941,34 @@ class KktImagePlugin(Star):
         prompt: str,
         image_items: list[dict],
         event: AstrMessageEvent | None = None,
+        *,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
     ) -> str | None:
         content = self._build_multimodal_content(prompt, image_items, event)
         image_count = sum(
             1 for part in content if isinstance(part, dict) and part.get("type") == "image_url"
         )
 
+        use_base = (api_base or self.api_base).rstrip("/")
+        use_key = api_key if api_key is not None else self.api_key
+        use_model = model or self.model
         payload = {
-            "model": self.model,
+            "model": use_model,
             "messages": [{"role": "user", "content": content}],
             "temperature": self.temperature,
         }
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {use_key}",
             "Content-Type": "application/json",
         }
-        endpoint = f"{self.api_base}/chat/completions"
+        endpoint = f"{use_base}/chat/completions"
         last_error = "未知错误"
         logger.debug(
             "[kkt] 请求准备完成: endpoint=%s model=%s prompt_length=%d image_count=%d content_parts=%d payload_bytes≈%d",
             endpoint,
-            self.model,
+            use_model,
             len(prompt),
             image_count,
             len(content),
