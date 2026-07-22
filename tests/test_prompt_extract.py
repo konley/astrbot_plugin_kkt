@@ -505,6 +505,27 @@ def test_compose_user_instruction_chinese_style():
     assert text2.startswith("用户指令") or "画一只猫" in text2
 
 
+def test_format_quota_status_unlimited_and_limited():
+    plugin = object.__new__(Plugin)
+    plugin.daily_quota = 0
+    plugin.cooldown_seconds = 0
+    plugin.quota_path = Path(".") / "no_quota.json"
+    plugin._user_last_call = {}
+    text = plugin._format_quota_status(None)
+    assert "不限制" in text
+
+    plugin.daily_quota = 50
+    plugin.cooldown_seconds = 15
+
+    def fake_load():
+        return {"date": "2026-07-22", "count": 7}
+
+    plugin._load_quota_state = fake_load  # type: ignore[method-assign]
+    text2 = plugin._format_quota_status(None)
+    assert "7/50" in text2
+    assert "剩余 43" in text2
+
+
 def test_cn_locale_style_parts_soft():
     """本地化软约束应含人物默认，且不含竖版/强制中国场景。"""
     # 用真实 __init__ 路径太重，直接复现拼接逻辑的关键短语

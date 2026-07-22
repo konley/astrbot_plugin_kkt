@@ -27,6 +27,8 @@ def build_help_text() -> str:
         "Hajimi 图片生成\n"
         "用法：/hajimi <提示词> 或 /kkt <提示词>\n"
         "回复图片后：/hajimi <编辑提示词> 或 /kkt <编辑提示词>\n"
+        "限额查询：/kkt额度 或 /kktquota 或 /hajimi额度\n"
+        "重置今日限额（仅管理员）：/kkt重置额度 或 /kktresetquota\n"
         "帮助：/hajimi help 或 /kkt help\n"
         "支持文生图、回复图片编辑和 @用户头像参考图。"
     )
@@ -36,7 +38,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.8",
+    "0.3.9",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -330,6 +332,60 @@ class KktImagePlugin(Star):
         except Exception as exc:
             logger.warning("[kkt] 写入日配额失败: %s", exc)
 
+    def _format_quota_status(self, event: AstrMessageEvent | None = None) -> str:
+        """生成限额状态文案（含日配额与当前用户 CD）。"""
+        today = date.today().isoformat()
+        if self.daily_quota <= 0:
+            daily_line = "今日总配额：不限制"
+            used = 0
+            remain = -1
+        else:
+            state = self._load_quota_state()
+            used = int(state.get("count") or 0)
+            remain = max(0, self.daily_quota - used)
+            daily_line = (
+                f"今日总配额：已用 {used}/{self.daily_quota}，剩余 {remain}\n"
+                f"统计日期：{state.get('date') or today}"
+            )
+
+        lines = [
+            "【Hajimi / kkt 限额】",
+            daily_line,
+        ]
+
+        if self.cooldown_seconds <= 0:
+            lines.append("个人冷却：关闭")
+        elif event is not None and self._is_admin(event):
+            lines.append(f"个人冷却：{self.cooldown_seconds}s（你是管理员，不受限）")
+        elif event is not None:
+            sender_id = str(event.get_sender_id() or "").strip()
+            last = self._user_last_call.get(sender_id) if sender_id else None
+            if last is None:
+                lines.append(f"个人冷却：{self.cooldown_seconds}s（当前可调用）")
+            else:
+                remain_cd = self.cooldown_seconds - (time.monotonic() - last)
+                if remain_cd > 0:
+                    lines.append(
+                        f"个人冷却：还需等待 {int(remain_cd) + 1}s"
+                        f"（间隔 {self.cooldown_seconds}s）"
+                    )
+                else:
+                    lines.append(f"个人冷却：{self.cooldown_seconds}s（当前可调用）")
+        else:
+            lines.append(f"个人冷却：{self.cooldown_seconds}s")
+
+        lines.append("超出日配额后仅管理员可继续生图。")
+        lines.append("管理员重置今日配额：/kkt重置额度 或 /kktresetquota")
+        return "\n".join(lines)
+
+    async def _reset_daily_quota(self) -> dict:
+        """将今日已用次数清零。返回新状态。"""
+        async with self._quota_lock:
+            state = {"date": date.today().isoformat(), "count": 0}
+            self._save_quota_state(state)
+            logger.info("[kkt] 日配额已重置: %s", state)
+            return state
+
     async def _check_and_consume_daily_quota(
         self, event: AstrMessageEvent
     ) -> str | None:
@@ -357,7 +413,8 @@ class KktImagePlugin(Star):
                     return None
                 return (
                     f"今日生图总配额已用完（{used}/{self.daily_quota}），"
-                    "请明天再试，或联系管理员。"
+                    "请明天再试，或联系管理员。\n"
+                    "查询限额：/kkt额度"
                 )
 
             state["count"] = used + 1
@@ -436,6 +493,46 @@ class KktImagePlugin(Star):
         # 全是空 / 纯 @：返回空，交给后续 help 或引用文案逻辑
         return ""
 
+    @filter.command("kkt额度", alias={"hajimi额度", "kktquota", "hajimiquota", "kkt限额", "hajimi限额"})
+    async def handle_quota_status(self, event: AstrMessageEvent):
+        """查看当前日配额与个人 CD。"""
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id and group_id in self.group_blacklist:
+            return
+        event.stop_event()
+        yield event.plain_result(self._format_quota_status(event))
+
+    @filter.command(
+        "kkt重置额度",
+        alias={
+            "hajimi重置额度",
+            "kktresetquota",
+            "hajimiresetquota",
+            "kkt清零额度",
+            "hajimi清零额度",
+        },
+    )
+    async def handle_quota_reset(self, event: AstrMessageEvent):
+        """重置今日总配额（仅管理员）。"""
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id and group_id in self.group_blacklist:
+            return
+        event.stop_event()
+        if not self._is_admin(event):
+            yield event.plain_result("只有管理员可以重置今日生图限额。")
+            return
+        await self._reset_daily_quota()
+        # 管理员重置时可选：不清个人 CD，只清日配额
+        text = (
+            "已重置今日生图总配额。\n"
+            + self._format_quota_status(event)
+        )
+        logger.info(
+            "[kkt] 管理员重置配额: operator=%s",
+            event.get_sender_id(),
+        )
+        yield event.plain_result(text)
+
     @filter.command("hajimi", alias={"kkt"})
     async def handle_command(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
         group_id = str(event.get_group_id() or "").strip()
@@ -450,6 +547,35 @@ class KktImagePlugin(Star):
             prompt[:200],
         )
         event.stop_event()
+
+        # 兼容：/kkt 额度、/kkt 重置额度 写在主指令参数里
+        normalized = re.sub(r"\s+", "", prompt.lower())
+        if normalized in {
+            "额度",
+            "限额",
+            "quota",
+            "配额",
+            "今日额度",
+            "今日限额",
+        }:
+            yield event.plain_result(self._format_quota_status(event))
+            return
+        if normalized in {
+            "重置额度",
+            "清零额度",
+            "resetquota",
+            "重置配额",
+            "清零配额",
+            "reset",
+        }:
+            if not self._is_admin(event):
+                yield event.plain_result("只有管理员可以重置今日生图限额。")
+                return
+            await self._reset_daily_quota()
+            yield event.plain_result(
+                "已重置今日生图总配额。\n" + self._format_quota_status(event)
+            )
+            return
 
         # 先收集引用图文，再判断 help。
         # 否则裸 /kkt + 引用文案 会在读引用之前就被当成空 prompt 返回帮助。
