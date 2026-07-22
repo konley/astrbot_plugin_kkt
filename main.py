@@ -34,10 +34,21 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.1.0",
+    "0.3.1",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
+
+    # 匹配指令名后的参数；支持 /kkt帮助、/kkt help、/kkt ?
+    _CMD_ARG_RE = re.compile(
+        r"^/?(?:hajimi|kkt)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    # AstrBot 把 At 序列化成 @昵称 或 @昵称(QQ号) 时用于剔除
+    _AT_TOKEN_RE = re.compile(
+        r"@[\w\u4e00-\u9fff\-·.]+(?:\(\d+\))?",
+        re.UNICODE,
+    )
 
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -69,17 +80,6 @@ class KktImagePlugin(Star):
         self._cleanup_stale_files()
 
     @staticmethod
-    def _parse_words(value) -> list[str]:
-        if isinstance(value, str):
-            value = value.split(",")
-        if not isinstance(value, list):
-            return []
-        return list(dict.fromkeys(
-            word.strip().lower() for word in value
-            if isinstance(word, str) and re.fullmatch(r"[a-z0-9_\-]+", word.strip(), re.IGNORECASE)
-        ))
-
-    @staticmethod
     def _parse_group_ids(value) -> set[str]:
         if isinstance(value, str):
             value = value.replace("，", ",").split(",")
@@ -90,33 +90,70 @@ class KktImagePlugin(Star):
             if re.fullmatch(r"\d+", group_id.strip())
         }
 
-    @staticmethod
-    def _extract_prompt(event: AstrMessageEvent, prompt: str) -> str:
-        """Recover text after the command when AstrBot parsed an At as an argument."""
-        prompt = (prompt or "").strip()
-        if prompt and not prompt.startswith("@"):
-            return prompt
+    @classmethod
+    def _command_arg_from_text(cls, text: str) -> str | None:
+        """从完整指令文本中截取命令后的参数；匹配失败返回 None。"""
+        text = (text or "").strip()
+        if not text:
+            return None
+        match = cls._CMD_ARG_RE.match(text)
+        if not match:
+            return None
+        return match.group(1).strip()
 
+    @classmethod
+    def _strip_at_tokens(cls, text: str) -> str:
+        """去掉 @昵称 / @昵称(QQ) 噪声，保留真实提示词。"""
+        cleaned = cls._AT_TOKEN_RE.sub(" ", text or "")
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @classmethod
+    def _is_help_token(cls, text: str) -> bool:
+        return (text or "").strip().lower() in {"帮助", "help", "?"}
+
+    @classmethod
+    def _extract_prompt(cls, event: AstrMessageEvent, prompt: str) -> str:
+        """从消息中恢复命令后的文字提示词。
+
+        AstrBot 的 GreedyStr 会把 At 组件序列化成 ``@昵称(QQ)``，导致
+        ``/kkt @user 换装`` 的 prompt 只剩 ``@昵称(QQ)``，后面正文丢失。
+        优先只拼 Plain 段（At 不在 Plain 里），再回退到整句并剥离 @ token。
+        """
+        prompt = (prompt or "").strip()
+
+        candidates: list[str] = []
+
+        # 1) 仅 Plain 段（@ 是独立 At 组件，不会混进这里）
         plain_text = "".join(
-            getattr(component, "text", "")
+            getattr(component, "text", "") or ""
             for component in event.get_messages()
             if isinstance(component, Comp.Plain)
-        ).strip()
-        match = re.match(
-            r"^/?(?:hajimi|kkt)(?:帮助|help|\\?)?\\s*(.*)$",
-            plain_text,
-            re.IGNORECASE,
         )
-        if match:
-            return match.group(1).strip()
+        from_plain = cls._command_arg_from_text(plain_text)
+        if from_plain is not None:
+            candidates.append(from_plain)
 
+        # 2) 整句 message_str（可能含 @昵称(QQ)）
         raw = (event.get_message_str() or "").strip()
-        match = re.match(
-            r"^/?(?:hajimi|kkt)(?:帮助|help|\\?)?\\s*(.*)$",
-            raw,
-            re.IGNORECASE,
-        )
-        return match.group(1).strip() if match else prompt
+        from_raw = cls._command_arg_from_text(raw)
+        if from_raw is not None:
+            candidates.append(from_raw)
+
+        # 3) 框架传入的 GreedyStr 参数
+        candidates.append(prompt)
+
+        for candidate in candidates:
+            text = candidate.strip()
+            if not text:
+                continue
+            if cls._is_help_token(text):
+                return text
+            cleaned = cls._strip_at_tokens(text) if "@" in text else text
+            if cleaned:
+                return cleaned
+
+        # 全是空 / 纯 @：返回空，交给后续 help 或引用文案逻辑
+        return ""
 
     @filter.command("hajimi", alias={"kkt"})
     async def handle_command(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
@@ -132,19 +169,9 @@ class KktImagePlugin(Star):
             prompt[:200],
         )
         event.stop_event()
-        if not prompt or prompt.lower() in {"帮助", "help", "?"}:
-            prompt = ""
-        if not prompt:
-            yield event.plain_result(self._help_text)
-            return
 
-        if not self.api_key:
-            logger.error("[kkt] 未配置 API Key")
-            yield event.plain_result(
-                "未配置 NewAPI Key，请在 AstrBot WebUI 的 Hajimi 图片生成插件配置中填写 api_key。"
-            )
-            return
-
+        # 先收集引用图文，再判断 help。
+        # 否则裸 /kkt + 引用文案 会在读引用之前就被当成空 prompt 返回帮助。
         try:
             image_parts, quoted_prompt = await self._collect_images(event)
         except Exception as exc:
@@ -152,7 +179,9 @@ class KktImagePlugin(Star):
             image_parts, quoted_prompt = [], ""
 
         if quoted_prompt:
-            prompt = f"{quoted_prompt}\n{prompt}".strip()
+            prompt = f"{quoted_prompt}\n{prompt}".strip() if prompt else quoted_prompt
+        elif self._is_help_token(prompt):
+            prompt = ""
 
         logger.info(
             "[kkt] 输入解析完成: prompt_length=%d image_count=%d quoted_prompt=%s",
@@ -162,6 +191,13 @@ class KktImagePlugin(Star):
         )
         if not prompt and not image_parts:
             yield event.plain_result(self._help_text)
+            return
+
+        if not self.api_key:
+            logger.error("[kkt] 未配置 API Key")
+            yield event.plain_result(
+                "未配置 NewAPI Key，请在 AstrBot WebUI 的 Hajimi 图片生成插件配置中填写 api_key。"
+            )
             return
 
         try:
