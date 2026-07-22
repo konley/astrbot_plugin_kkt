@@ -36,7 +36,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.5",
+    "0.3.6",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -784,12 +784,26 @@ class KktImagePlugin(Star):
                                 "data_url" if image.startswith("data:") else "url",
                             )
                             return image
+                        text_reply = self._extract_text_reply(data)
+                        finish = self._extract_finish_reason(data)
                         logger.error(
-                            "[kkt] API JSON 未找到图片: top_keys=%s choices=%d",
+                            "[kkt] API JSON 未找到图片: top_keys=%s choices=%d "
+                            "finish_reason=%s text_preview=%r raw_preview=%r",
                             list(data)[:20] if isinstance(data, dict) else type(data).__name__,
                             len(data.get("choices", [])) if isinstance(data, dict) else 0,
+                            finish,
+                            (text_reply or "")[:300],
+                            raw[:300],
                         )
-                        raise RuntimeError("API 响应中未找到图片")
+                        # 模型只回了文字（审核/拒答/中转丢图）：有文本则直接转给用户，不再无意义重试
+                        if text_reply:
+                            raise RuntimeError(
+                                f"模型未返回图片，而是回复了文字：{text_reply[:400]}"
+                            )
+                        raise RuntimeError(
+                            "API 响应中未找到图片"
+                            + (f"（finish_reason={finish}）" if finish else "")
+                        )
             except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
                 last_error = str(exc)
                 logger.error(
@@ -797,34 +811,203 @@ class KktImagePlugin(Star):
                     attempt + 1,
                     last_error[:300],
                 )
-                if attempt < self.max_retry and not ("Key 无效" in last_error or "权限" in last_error):
+                # 认证失败 / 模型明确用文字拒答：不再重试
+                no_retry = (
+                    "Key 无效" in last_error
+                    or "权限" in last_error
+                    or "模型未返回图片，而是回复了文字" in last_error
+                )
+                if attempt < self.max_retry and not no_retry:
                     await asyncio.sleep(self.retry_delay)
                     continue
                 raise RuntimeError(last_error) from exc
         return None
 
     @staticmethod
-    def _extract_image(data: dict) -> str | None:
-        message = (data.get("choices") or [{}])[0].get("message") or {}
-        for item in message.get("images") or []:
-            value = item.get("url") if isinstance(item, dict) else None
-            value = value or ((item.get("image_url") or {}).get("url") if isinstance(item, dict) else None)
-            if value:
+    def _message_from_response(data: dict) -> dict:
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not choices:
+            return {}
+        first = choices[0] if isinstance(choices, list) else {}
+        if not isinstance(first, dict):
+            return {}
+        message = first.get("message") or first.get("delta") or {}
+        return message if isinstance(message, dict) else {}
+
+    @classmethod
+    def _extract_finish_reason(cls, data: dict) -> str:
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not choices or not isinstance(choices, list):
+            return ""
+        first = choices[0] if choices else {}
+        if not isinstance(first, dict):
+            return ""
+        return str(first.get("finish_reason") or first.get("finishReason") or "")
+
+    @classmethod
+    def _extract_text_reply(cls, data: dict) -> str:
+        """从 chat/completions 响应中提取纯文本（无图时用于提示用户）。"""
+        message = cls._message_from_response(data)
+        chunks: list[str] = []
+
+        def collect(value) -> None:
+            if value is None:
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                # 跳过 data-url / 裸 base64 噪声
+                if text.startswith("data:image"):
+                    return
+                if len(text) > 80 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", text):
+                    return
+                if text:
+                    chunks.append(text)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect(item)
+                return
+            if isinstance(value, dict):
+                # 常见多模态 content part
+                part_type = value.get("type")
+                if part_type in {"text", "input_text", "output_text"}:
+                    collect(value.get("text") or value.get("content"))
+                    return
+                if "text" in value and part_type not in {
+                    "image_url",
+                    "image",
+                    "input_image",
+                }:
+                    collect(value.get("text"))
+                # refusal 字段（部分兼容层）
+                if value.get("refusal"):
+                    collect(value.get("refusal"))
+
+        collect(message.get("content"))
+        collect(message.get("refusal"))
+        # 少数网关把说明放在顶层
+        if isinstance(data, dict):
+            collect(data.get("error"))
+            err = data.get("error")
+            if isinstance(err, dict):
+                collect(err.get("message"))
+
+        # 去重保序
+        ordered: list[str] = []
+        for item in chunks:
+            if item not in ordered:
+                ordered.append(item)
+        return "\n".join(ordered).strip()
+
+    @classmethod
+    def _extract_image(cls, data: dict) -> str | None:
+        message = cls._message_from_response(data)
+
+        def from_url_candidate(value) -> str | None:
+            if not isinstance(value, str):
+                return None
+            value = value.strip()
+            if not value:
+                return None
+            if value.startswith("data:image/"):
                 return value
+            if value.startswith("http://") or value.startswith("https://"):
+                # 避免把普通网页链接当图；有扩展名或常见图床路径更可信
+                lower = value.lower().split("?", 1)[0]
+                if any(
+                    lower.endswith(ext)
+                    for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+                ) or any(
+                    token in lower
+                    for token in (
+                        "/image",
+                        "img",
+                        "pic",
+                        "cdn",
+                        "oss",
+                        "cos.",
+                        "s3.",
+                    )
+                ):
+                    return value
+                # 仍接受 http(s)，兼容无扩展名的临时图链
+                return value
+            return None
+
+        # 1) message.images（NewAPI / Gemini 兼容常见字段）
+        for item in message.get("images") or []:
+            if isinstance(item, str):
+                found = from_url_candidate(item)
+                if found:
+                    return found
+                continue
+            if not isinstance(item, dict):
+                continue
+            for key in ("url", "image_url", "b64_json", "data"):
+                raw_val = item.get(key)
+                if key == "image_url" and isinstance(raw_val, dict):
+                    raw_val = raw_val.get("url")
+                if key in {"b64_json", "data"} and isinstance(raw_val, str) and raw_val:
+                    if raw_val.startswith("data:image/"):
+                        return raw_val
+                    return f"data:image/png;base64,{raw_val}"
+                found = from_url_candidate(raw_val) if isinstance(raw_val, str) else None
+                if found:
+                    return found
+
+        # 2) content 列表 / 字符串
         content = message.get("content")
         parts = content if isinstance(content, list) else [content]
         for part in parts:
-            if isinstance(part, dict) and part.get("type") == "image_url":
-                value = (part.get("image_url") or {}).get("url") or part.get("url")
-                if value:
-                    return value
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type in {"image_url", "image", "input_image", "output_image"}:
+                    value = part.get("image_url") or part.get("url") or part.get("image")
+                    if isinstance(value, dict):
+                        value = value.get("url") or value.get("data")
+                    if isinstance(value, str):
+                        if value.startswith("data:image/") or value.startswith("http"):
+                            found = from_url_candidate(value)
+                            if found:
+                                return found
+                        # 纯 base64
+                        if len(value) > 64 and re.fullmatch(r"[A-Za-z0-9+/=\s]+", value or ""):
+                            return f"data:image/png;base64,{value.strip()}"
+                # inline_data / Gemini 风格
+                inline = part.get("inline_data") or part.get("inlineData")
+                if isinstance(inline, dict):
+                    blob = inline.get("data")
+                    mime = inline.get("mime_type") or inline.get("mimeType") or "image/png"
+                    if isinstance(blob, str) and blob:
+                        if blob.startswith("data:image/"):
+                            return blob
+                        return f"data:{mime};base64,{blob}"
             if isinstance(part, str):
                 match = re.search(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", part)
                 if match:
                     return match.group(0)
+                # markdown 图片
+                match = re.search(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", part)
+                if match:
+                    found = from_url_candidate(match.group(1))
+                    if found:
+                        return found
                 match = re.search(r"https?://[^\s)>'\"]+", part)
                 if match:
-                    return match.group(0)
+                    found = from_url_candidate(match.group(0))
+                    if found:
+                        return found
+
+        # 3) 顶层 data[]（少数 images 接口混在 chat 里）
+        if isinstance(data, dict):
+            for item in data.get("data") or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("b64_json"):
+                    return f"data:image/png;base64,{item['b64_json']}"
+                found = from_url_candidate(item.get("url") or "")
+                if found:
+                    return found
         return None
 
     async def _materialize_image(self, value: str) -> str | None:

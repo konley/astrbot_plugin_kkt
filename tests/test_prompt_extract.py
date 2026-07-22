@@ -440,3 +440,52 @@ def test_build_multimodal_content_interleaved():
     joined = " ".join(c["text"] for c in content if c["type"] == "text")
     assert "用户指令" in joined
     assert "图2" in joined
+
+
+def test_extract_text_reply_from_chat_completion():
+    data = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "抱歉，我无法生成该内容。",
+                },
+            }
+        ]
+    }
+    assert Plugin._extract_image(data) is None
+    assert "无法生成" in Plugin._extract_text_reply(data)
+    assert Plugin._extract_finish_reason(data) == "stop"
+
+
+def test_extract_image_from_images_field_and_b64():
+    data = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "images": [
+                        {"url": "data:image/png;base64,AAA"},
+                    ],
+                }
+            }
+        ]
+    }
+    assert Plugin._extract_image(data) == "data:image/png;base64,AAA"
+
+    data2 = {
+        "choices": [
+            {
+                "message": {
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://cdn.example.com/a.png"},
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    assert "a.png" in (Plugin._extract_image(data2) or "")
