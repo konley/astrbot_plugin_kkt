@@ -1,0 +1,86 @@
+{
+  "command": {
+    "description": "主唤醒词",
+    "type": "string",
+    "default": "hajimi",
+    "hint": "仅支持英文字母、数字、下划线和短横线，例如 hajimi"
+  },
+  "aliases": {
+    "description": "唤醒词别名",
+    "type": "list",
+    "default": [],
+    "hint": "可填写多个别名；支持英文、数字、下划线和短横线"
+  },
+  "allow_without_slash": {
+    "description": "允许省略 / 前缀",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时必须使用 /hajimi；开启后 hajimi 和 /hajimi 都可以触发"
+  },
+  "group_blacklist": {
+    "description": "群聊黑名单",
+    "type": "list",
+    "default": [],
+    "hint": "填写纯数字群号，例如 123456789；黑名单群不会响应插件"
+  },
+  "api_base": {
+    "description": "API 基址",
+    "type": "string",
+    "default": "https://newapi.qianqianye.com/v1",
+    "hint": "通常保持默认值，不要填写 /chat/completions"
+  },
+  "api_key": {
+    "description": "NewAPI API Key",
+    "type": "string",
+    "default": "",
+    "hint": "在令牌页面生成；仅保存在 AstrBot 插件配置中"
+  },
+  "model": {
+    "description": "图像模型",
+    "type": "string",
+    "default": "gemini-3.1-flash-image",
+    "hint": "默认使用 gemini-3.1-flash-image"
+  },
+  "temperature": {
+    "description": "Temperature",
+    "type": "float",
+    "default": 0.7,
+    "hint": "发送给 chat/completions 的 temperature 参数"
+  },
+  "timeout": {
+    "description": "请求超时秒数",
+    "type": "int",
+    "default": 180,
+    "hint": "图片生成通常需要几十秒"
+  },
+  "max_retry": {
+    "description": "失败重试次数",
+    "type": "int",
+    "default": 2,
+    "hint": "仅对网络错误、429 和 5xx 重试"
+  },
+  "retry_delay": {
+    "description": "重试间隔秒数",
+    "type": "int",
+    "default": 2,
+    "hint": "429 或服务端错误后的等待时间"
+  },
+  "enable_reply_image": {
+    "description": "启用回复图片编辑",
+    "type": "bool",
+    "default": true,
+    "hint": "回复一张图片并使用 /hajimi 提示词时，将图片作为参考图"
+  },
+  "enable_at_avatar": {
+    "description": "启用 @用户头像",
+    "type": "bool",
+    "default": false,
+    "hint": "QQ 适配器中允许 /hajimi 使用 @用户头像作为参考图"
+  },
+  "cleanup_delay": {
+    "description": "临时文件清理延迟秒数",
+    "type": "int",
+    "default": 15,
+    "hint": "发送图片后等待一段时间再删除本地文件"
+  }
+}
