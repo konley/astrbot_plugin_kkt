@@ -59,6 +59,43 @@
     "default": false,
     "hint": "QQ 适配器中允许 /hajimi 或 /kkt 使用 @用户头像作为参考图"
   },
+  "reply_with_quote": {
+    "description": "出图时引用原指令",
+    "type": "bool",
+    "default": true,
+    "hint": "生成图片后引用回复触发 /kkt 或 /hajimi 的那条消息；关闭则只发图"
+  },
+  "reaction_emoji_enabled": {
+    "description": "触发生图时表情回应",
+    "type": "bool",
+    "default": true,
+    "hint": "识别到指令后对原消息点表情（不是文字回复），提示已开始处理。需 QQ/aiocqhttp，仅群聊"
+  },
+  "reaction_emoji_list": {
+    "description": "回应表情ID列表(0~5个)",
+    "type": "list",
+    "default": [147],
+    "hint": "QQ emoji_id,空列表=不回应,最多5个。常用:棒棒糖=147 OK=124 赞=76 爱心=66。完整列表: https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html"
+  },
+  "reaction_emoji_strategy": {
+    "description": "回应策略",
+    "type": "string",
+    "default": "随机",
+    "options": ["随机", "顺序循环"],
+    "hint": "随机:每次从列表抽1个。顺序循环:按列表依次全部回应,每个间隔0.5s(同一消息多表情)。"
+  },
+  "cooldown_seconds": {
+    "description": "用户冷却秒数(CD)",
+    "type": "int",
+    "default": 15,
+    "hint": "同一用户两次生图的最小间隔，仅对该用户生效；0=关闭。管理员不受 CD 限制"
+  },
+  "daily_quota": {
+    "description": "单日总配额",
+    "type": "int",
+    "default": 50,
+    "hint": "全服每天最多生图次数；0=不限制。超出后普通用户不可用，仅管理员可继续调用"
+  },
   "cleanup_delay": {
     "description": "临时文件清理延迟秒数",
     "type": "int",

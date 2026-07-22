@@ -6,7 +6,9 @@ import json
 import os
 import re
 import time
+from datetime import date
 from pathlib import Path
+from random import choice
 from urllib.parse import urlparse
 
 import aiohttp
@@ -34,7 +36,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.3.1",
+    "0.3.3",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -67,15 +69,43 @@ class KktImagePlugin(Star):
         self.retry_delay = max(0, int(config.get("retry_delay", 2)))
         self.enable_reply_image = bool(config.get("enable_reply_image", True))
         self.enable_at_avatar = bool(config.get("enable_at_avatar", False))
+        # 出图后引用触发指令的那条消息（默认开）
+        self.reply_with_quote = bool(config.get("reply_with_quote", True))
+        # 触发生图时对原消息做 QQ 表情回应（不是文字回复）
+        self.reaction_emoji_enabled = bool(config.get("reaction_emoji_enabled", True))
+        self.reaction_emoji_list = self._parse_emoji_ids(
+            config.get("reaction_emoji_list", [147])
+        )
+        strategy = str(config.get("reaction_emoji_strategy", "随机")).strip()
+        self.reaction_emoji_strategy = (
+            strategy if strategy in {"随机", "顺序循环"} else "随机"
+        )
+        self.reaction_emoji_type = "1"
+        # 防刷：每用户独立 CD（秒）；0=关闭；管理员不受限
+        self.cooldown_seconds = max(0, int(config.get("cooldown_seconds", 15)))
+        # 单日全服总调用次数上限；0=不限制；超出后仅管理员可继续
+        self.daily_quota = max(0, int(config.get("daily_quota", 50)))
         self.cleanup_delay = max(5, int(config.get("cleanup_delay", 15)))
         self.temp_dir = Path(get_astrbot_data_path()) / "plugin_data" / "kkt"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.quota_path = self.temp_dir / "daily_quota.json"
+        # 内存：sender_id -> 上次成功触发生图的 monotonic 时间
+        self._user_last_call: dict[str, float] = {}
+        self._quota_lock = asyncio.Lock()
         self._help_text = build_help_text()
         logger.info(
-            "[kkt] 插件已加载: commands=/hajimi,/kkt blacklist_count=%d model=%s endpoint=%s",
+            "[kkt] 插件已加载: commands=/hajimi,/kkt blacklist_count=%d model=%s "
+            "endpoint=%s reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
+            "cooldown=%ds daily_quota=%d enable_at_avatar=%s",
             len(self.group_blacklist),
             self.model,
             f"{self.api_base}/chat/completions",
+            self.reply_with_quote,
+            self.reaction_emoji_enabled,
+            len(self.reaction_emoji_list),
+            self.cooldown_seconds,
+            self.daily_quota,
+            self.enable_at_avatar,
         )
         self._cleanup_stale_files()
 
@@ -89,6 +119,218 @@ class KktImagePlugin(Star):
             group_id.strip() for group_id in map(str, value)
             if re.fullmatch(r"\d+", group_id.strip())
         }
+
+    @staticmethod
+    def _coerce_positive_int(value) -> int | None:
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    @classmethod
+    def _parse_emoji_ids(cls, value) -> list[int]:
+        """解析 0~5 个 QQ emoji_id；空列表表示不回应。"""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = value.replace("，", ",").split(",")
+        if not isinstance(value, list):
+            value = [value]
+        result: list[int] = []
+        for item in value:
+            emoji_id = cls._coerce_positive_int(item)
+            if emoji_id is not None and emoji_id not in result:
+                result.append(emoji_id)
+            if len(result) >= 5:
+                break
+        return result
+
+    @staticmethod
+    def _extract_reaction_message_id(event: AstrMessageEvent) -> int | None:
+        """多源提取原消息 ID，对齐 link_resolver。"""
+        raw = getattr(event.message_obj, "raw_message", None)
+        candidates: list[object] = []
+        if isinstance(raw, dict):
+            candidates.append(raw.get("message_id"))
+        elif raw is not None and hasattr(raw, "message_id"):
+            candidates.append(getattr(raw, "message_id", None))
+        candidates.append(getattr(event.message_obj, "message_id", None))
+        for value in candidates:
+            if value is None:
+                continue
+            try:
+                mid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if mid > 0:
+                return mid
+        return None
+
+    async def _send_reaction_emoji(self, event: AstrMessageEvent) -> None:
+        """对触发指令的消息做 QQ 表情回应（不是发文字）。
+
+        实现参考 astrbot_plugin_link_resolver：bot.set_msg_emoji_like。
+        仅群聊 + aiocqhttp/NapCat；失败只记日志，不影响出图。
+        """
+        if not self.reaction_emoji_enabled:
+            return
+        if not self.reaction_emoji_list:
+            logger.debug("[kkt] 表情回应跳过: 列表为空")
+            return
+        if not event.get_group_id():
+            logger.debug("[kkt] 表情回应跳过: 非群消息")
+            return
+        bot = getattr(event, "bot", None)
+        if bot is None or not hasattr(bot, "set_msg_emoji_like"):
+            logger.debug("[kkt] 表情回应跳过: 平台不支持 set_msg_emoji_like")
+            return
+        message_id = self._extract_reaction_message_id(event)
+        if message_id is None:
+            logger.debug("[kkt] 表情回应跳过: 无法获取 message_id")
+            return
+
+        if self.reaction_emoji_strategy == "顺序循环":
+            emoji_ids = list(self.reaction_emoji_list)
+        else:
+            emoji_ids = [choice(self.reaction_emoji_list)]
+
+        for emoji_id in emoji_ids:
+            try:
+                await bot.set_msg_emoji_like(
+                    message_id=message_id,
+                    emoji_id=emoji_id,
+                    emoji_type=self.reaction_emoji_type,
+                    set=True,
+                )
+                logger.info(
+                    "[kkt] 表情回应成功: message_id=%s emoji_id=%s",
+                    message_id,
+                    emoji_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[kkt] 表情回应失败: message_id=%s emoji_id=%s error=%s",
+                    message_id,
+                    emoji_id,
+                    str(exc)[:200],
+                )
+            if len(emoji_ids) > 1:
+                await asyncio.sleep(0.5)
+
+    def _build_image_chain(self, event: AstrMessageEvent, image_path: str) -> list:
+        """组装出图消息链；可选前置 Reply 引用触发指令的消息。"""
+        chain: list = []
+        if self.reply_with_quote:
+            message_id = self._extract_reaction_message_id(event)
+            if message_id is not None:
+                chain.append(Comp.Reply(id=message_id))
+            else:
+                logger.debug("[kkt] 引用回复跳过: 无法获取 message_id")
+        chain.append(Comp.Image(file=str(image_path)))
+        return chain
+
+    @staticmethod
+    def _is_admin(event: AstrMessageEvent) -> bool:
+        try:
+            return bool(event.is_admin())
+        except Exception:
+            return False
+
+    def _check_user_cooldown(self, event: AstrMessageEvent) -> str | None:
+        """检查 per-user CD；管理员跳过。返回提示文案或 None。"""
+        if self.cooldown_seconds <= 0:
+            return None
+        if self._is_admin(event):
+            return None
+        sender_id = str(event.get_sender_id() or "").strip()
+        if not sender_id:
+            return None
+        last = self._user_last_call.get(sender_id)
+        if last is None:
+            return None
+        elapsed = time.monotonic() - last
+        remain = self.cooldown_seconds - elapsed
+        if remain > 0:
+            return f"操作太快了，请 {int(remain) + 1} 秒后再试。"
+        return None
+
+    def _mark_user_cooldown(self, event: AstrMessageEvent) -> None:
+        if self.cooldown_seconds <= 0:
+            return
+        if self._is_admin(event):
+            return
+        sender_id = str(event.get_sender_id() or "").strip()
+        if sender_id:
+            self._user_last_call[sender_id] = time.monotonic()
+
+    def _load_quota_state(self) -> dict:
+        today = date.today().isoformat()
+        default = {"date": today, "count": 0}
+        try:
+            if not self.quota_path.exists():
+                return default
+            data = json.loads(self.quota_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return default
+            if str(data.get("date") or "") != today:
+                return default
+            count = int(data.get("count") or 0)
+            return {"date": today, "count": max(0, count)}
+        except Exception as exc:
+            logger.warning("[kkt] 读取日配额失败: %s", exc)
+            return default
+
+    def _save_quota_state(self, state: dict) -> None:
+        try:
+            self.quota_path.parent.mkdir(parents=True, exist_ok=True)
+            self.quota_path.write_text(
+                json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("[kkt] 写入日配额失败: %s", exc)
+
+    async def _check_and_consume_daily_quota(
+        self, event: AstrMessageEvent
+    ) -> str | None:
+        """检查并消耗单日总配额。
+
+        - daily_quota<=0：不限制
+        - 未超限：count+1 后放行
+        - 已超限：仅管理员可继续（管理员调用不计入额外占用，也可继续调用）
+        """
+        if self.daily_quota <= 0:
+            return None
+
+        async with self._quota_lock:
+            state = self._load_quota_state()
+            used = int(state.get("count") or 0)
+            is_admin = self._is_admin(event)
+
+            if used >= self.daily_quota:
+                if is_admin:
+                    logger.info(
+                        "[kkt] 日配额已满但仍允许管理员: used=%d limit=%d",
+                        used,
+                        self.daily_quota,
+                    )
+                    return None
+                return (
+                    f"今日生图总配额已用完（{used}/{self.daily_quota}），"
+                    "请明天再试，或联系管理员。"
+                )
+
+            state["count"] = used + 1
+            state["date"] = date.today().isoformat()
+            self._save_quota_state(state)
+            logger.info(
+                "[kkt] 日配额消耗: used=%d/%d admin=%s",
+                state["count"],
+                self.daily_quota,
+                is_admin,
+            )
+            return None
 
     @classmethod
     def _command_arg_from_text(cls, text: str) -> str | None:
@@ -200,6 +442,24 @@ class KktImagePlugin(Star):
             )
             return
 
+        # per-user CD（管理员跳过）
+        cd_msg = self._check_user_cooldown(event)
+        if cd_msg:
+            yield event.plain_result(cd_msg)
+            return
+
+        # 单日总配额（超限后仅管理员可继续）
+        quota_msg = await self._check_and_consume_daily_quota(event)
+        if quota_msg:
+            yield event.plain_result(quota_msg)
+            return
+
+        # 通过限流后再记 CD，避免配额/校验失败也吃 CD
+        self._mark_user_cooldown(event)
+
+        # 开始干活前先表情回应原消息（不阻塞生图）
+        asyncio.create_task(self._send_reaction_emoji(event))
+
         try:
             logger.info("[kkt] 开始调用图像 API: model=%s image_count=%d", self.model, len(image_parts))
             result = await self._request_image(prompt, image_parts)
@@ -212,7 +472,7 @@ class KktImagePlugin(Star):
                 yield event.plain_result("图片下载或解析失败，请稍后重试。")
                 return
             logger.info("[kkt] 图片处理成功: path=%s", image_path)
-            yield event.chain_result([Comp.Image(file=str(image_path))])
+            yield event.chain_result(self._build_image_chain(event, image_path))
             self._schedule_cleanup(image_path)
         except Exception as exc:
             logger.error(f"[kkt] 图片生成失败: {exc}")
@@ -258,14 +518,32 @@ class KktImagePlugin(Star):
         for component in [*quoted_images, *current_images]:
             await add_image(component)
 
+        # 无现成图片时：enable_at_avatar 开启则收集全部 @ 用户头像（支持 N 个）
         if self.enable_at_avatar and not images:
+            seen_qq: set[str] = set()
             for component in event.get_messages():
-                if isinstance(component, Comp.At):
-                    qq = getattr(component, "qq", None) or getattr(component, "target", None)
-                    if qq:
-                        avatar = Comp.Image.fromURL(f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640")
-                        await add_image(avatar)
-                        break
+                if not isinstance(component, Comp.At):
+                    continue
+                qq = getattr(component, "qq", None) or getattr(component, "target", None)
+                if qq is None or str(qq) in {"", "0", "all"}:
+                    continue
+                qq_str = str(qq).strip()
+                if not qq_str or qq_str in seen_qq:
+                    continue
+                # 跳过 @机器人自己（若能取到）
+                try:
+                    self_id = str(event.get_self_id() or "").strip()
+                except Exception:
+                    self_id = ""
+                if self_id and qq_str == self_id:
+                    continue
+                seen_qq.add(qq_str)
+                avatar = Comp.Image.fromURL(
+                    f"https://q1.qlogo.cn/g?b=qq&nk={qq_str}&s=640"
+                )
+                await add_image(avatar)
+            if seen_qq:
+                logger.info("[kkt] 收集 @ 头像: count=%d qqs=%s", len(seen_qq), list(seen_qq)[:10])
         return images, "\n".join(quoted_texts)
 
     async def _request_image(self, prompt: str, image_parts: list[dict]) -> str | None:

@@ -100,8 +100,9 @@ def _install_stubs() -> None:
             return "dGVzdA=="
 
     class Reply:
-        def __init__(self, chain=None):
+        def __init__(self, chain=None, id=None, **kwargs):
             self.chain = chain or []
+            self.id = id if id is not None else kwargs.get("id")
 
     comp.Plain = Plain
     comp.At = At
@@ -260,3 +261,112 @@ def test_bad_old_regex_would_fail_but_new_works():
     sample = "/kkt  把帽子换成肯德基"
     assert bad.match(sample) is None
     assert good.match(sample).group(1).strip() == "把帽子换成肯德基"
+
+
+def test_parse_emoji_ids_cap_and_dedupe():
+    assert Plugin._parse_emoji_ids([147, "66", 147, 0, -1, "x", 76, 124, 1, 2]) == [
+        147,
+        66,
+        76,
+        124,
+        1,
+    ]
+    assert Plugin._parse_emoji_ids([]) == []
+    assert Plugin._parse_emoji_ids("147,66") == [147, 66]
+    assert Plugin._parse_emoji_ids(None) == []
+
+
+def test_extract_reaction_message_id_from_message_obj():
+    event = FakeEvent([], "")
+    event.message_obj = SimpleNamespace(message_id=12345, raw_message=None)
+    assert Plugin._extract_reaction_message_id(event) == 12345
+
+    event.message_obj = SimpleNamespace(
+        message_id=None,
+        raw_message={"message_id": "999"},
+    )
+    assert Plugin._extract_reaction_message_id(event) == 999
+
+
+def test_build_image_chain_with_quote():
+    plugin = object.__new__(Plugin)
+    plugin.reply_with_quote = True
+    event = FakeEvent([], "")
+    event.message_obj = SimpleNamespace(message_id=42, raw_message=None)
+    chain = plugin._build_image_chain(event, "/tmp/a.jpg")
+    assert len(chain) == 2
+    assert isinstance(chain[0], Comp.Reply)
+    assert chain[0].id == 42
+    assert isinstance(chain[1], Comp.Image)
+    assert chain[1].file == "/tmp/a.jpg"
+
+
+def test_build_image_chain_without_quote():
+    plugin = object.__new__(Plugin)
+    plugin.reply_with_quote = False
+    event = FakeEvent([], "")
+    event.message_obj = SimpleNamespace(message_id=42, raw_message=None)
+    chain = plugin._build_image_chain(event, "/tmp/a.jpg")
+    assert len(chain) == 1
+    assert isinstance(chain[0], Comp.Image)
+
+
+class _UserEvent(FakeEvent):
+    def __init__(self, sender_id="10001", admin=False):
+        super().__init__([], "")
+        self._sender_id = sender_id
+        self._admin = admin
+        self.message_obj = SimpleNamespace(message_id=1, raw_message=None)
+
+    def get_sender_id(self):
+        return self._sender_id
+
+    def is_admin(self):
+        return self._admin
+
+
+def test_user_cooldown_blocks_same_user():
+    plugin = object.__new__(Plugin)
+    plugin.cooldown_seconds = 15
+    plugin._user_last_call = {}
+    event = _UserEvent("u1", admin=False)
+    assert plugin._check_user_cooldown(event) is None
+    plugin._mark_user_cooldown(event)
+    msg = plugin._check_user_cooldown(event)
+    assert msg is not None
+    assert "秒" in msg
+
+
+def test_user_cooldown_skips_admin_and_other_user():
+    plugin = object.__new__(Plugin)
+    plugin.cooldown_seconds = 15
+    plugin._user_last_call = {}
+    user = _UserEvent("u1")
+    admin = _UserEvent("admin1", admin=True)
+    other = _UserEvent("u2")
+    plugin._mark_user_cooldown(user)
+    assert plugin._check_user_cooldown(admin) is None
+    assert plugin._check_user_cooldown(other) is None
+    assert plugin._check_user_cooldown(user) is not None
+
+
+def test_daily_quota_file_and_admin_bypass(tmp_path):
+    import asyncio
+
+    plugin = object.__new__(Plugin)
+    plugin.daily_quota = 2
+    plugin.quota_path = tmp_path / "daily_quota.json"
+    plugin._quota_lock = asyncio.Lock()
+
+    async def run():
+        e1 = _UserEvent("u1")
+        e2 = _UserEvent("u2")
+        e3 = _UserEvent("u3")
+        admin = _UserEvent("a1", admin=True)
+        assert await plugin._check_and_consume_daily_quota(e1) is None
+        assert await plugin._check_and_consume_daily_quota(e2) is None
+        msg = await plugin._check_and_consume_daily_quota(e3)
+        assert msg is not None and "配额" in msg
+        assert await plugin._check_and_consume_daily_quota(admin) is None
+
+    asyncio.run(run())
