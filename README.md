@@ -1,6 +1,6 @@
 # 康康图（astrbot_plugin_kkt）
 
-AstrBot 图片生成与编辑插件。通过 OpenAI 兼容接口调用图像模型，支持文生图、图生图、多图参考、引用消息、可配置唤醒词、唤醒词别名和群聊黑名单。
+AstrBot 图片生成与编辑插件。通过 OpenAI 兼容接口调用图像模型，支持文生图、图生图、多图参考、引用消息、固定 `/hajimi` 和 `/kkt` 命令，以及群聊黑名单。
 
 当前默认接口为：
 
@@ -15,7 +15,7 @@ https://newapi.qianqianye.com/v1/chat/completions
 - 引用图文：引用消息中的文字会作为 Prompt，引用图片会作为参考图。
 - 多图输入：引用图片和当前消息图片会合并发送，并自动去重。
 - 忽略引用产生的 @：引用消息时平台自动附带的 @ 不会进入 Prompt，也不会自动触发头像参考图。
-- 可配置唤醒词：默认 `/hajimi`，可以修改主唤醒词并添加别名。
+- 固定命令：`/hajimi` 和 `/kkt`，两者都可以触发插件。
 - 群聊黑名单：黑名单群不会响应，也不会调用图像 API。
 - 异步请求、失败重试和临时文件自动清理。
 
@@ -216,60 +216,23 @@ enable_at_avatar = true
 
 ## 唤醒词和别名
 
-### 修改主唤醒词
+### 固定命令
 
-在 WebUI 中修改：
-
-```text
-command = draw
-```
-
-之后使用：
-
-```text
-/draw 一只猫
-/draw帮助
-```
-
-### 添加别名
-
-例如：
-
-```text
-command = hajimi
-aliases = [draw, 画图]
-```
-
-可以使用：
+插件固定注册以下两个 AstrBot 命令：
 
 ```text
 /hajimi 一只猫
-/draw 一只猫
-/画图 一只猫
+/kkt 一只猫
 ```
 
-唤醒词和别名只支持英文字母、数字、下划线和短横线。建议使用简短且不容易与普通聊天内容冲突的词语。
-
-### 允许省略斜杠
-
-默认值：
+帮助命令：
 
 ```text
-allow_without_slash = false
+/hajimi帮助
+/kkt帮助
 ```
 
-默认只能使用：
-
-```text
-/hajimi 一只猫
-```
-
-将其改为 `true` 后，以下两种形式都可以：
-
-```text
-/hajimi 一只猫
-hajimi 一只猫
-```
+两个命令会出现在 AstrBot 的“管理行为”中。命令必须带 `/` 前缀。
 
 ## 群聊黑名单
 
@@ -292,9 +255,6 @@ hajimi 一只猫
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |---|---|---:|---|
-| `command` | string | `hajimi` | 主唤醒词 |
-| `aliases` | list | `[]` | 唤醒词别名 |
-| `allow_without_slash` | bool | `false` | 是否允许省略 `/` |
 | `group_blacklist` | list | `[]` | 群聊黑名单，填写纯数字群号 |
 | `api_base` | string | `https://newapi.qianqianye.com/v1` | API 基址，不要填写 `/chat/completions` |
 | `api_key` | string | 空 | NewAPI API Key |
@@ -314,7 +274,7 @@ hajimi 一只猫
 ```text
 引用消息文字
     +
-当前 /hajimi 后面的文字
+当前 /hajimi 或 /kkt 后面的文字
 ```
 
 引用消息中的图片、当前消息中的图片和可选头像不会转换成文字，而是作为多模态图片输入发送。

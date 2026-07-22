@@ -1,22 +1,4 @@
 {
-  "command": {
-    "description": "主唤醒词",
-    "type": "string",
-    "default": "hajimi",
-    "hint": "仅支持英文字母、数字、下划线和短横线，例如 hajimi"
-  },
-  "aliases": {
-    "description": "唤醒词别名",
-    "type": "list",
-    "default": [],
-    "hint": "可填写多个别名；支持英文、数字、下划线和短横线"
-  },
-  "allow_without_slash": {
-    "description": "允许省略 / 前缀",
-    "type": "bool",
-    "default": false,
-    "hint": "关闭时必须使用 /hajimi；开启后 hajimi 和 /hajimi 都可以触发"
-  },
   "group_blacklist": {
     "description": "群聊黑名单",
     "type": "list",
@@ -69,13 +51,13 @@
     "description": "启用回复图片编辑",
     "type": "bool",
     "default": true,
-    "hint": "回复一张图片并使用 /hajimi 提示词时，将图片作为参考图"
+    "hint": "回复一张图片并使用 /hajimi 或 /kkt 提示词时，将图片作为参考图"
   },
   "enable_at_avatar": {
     "description": "启用 @用户头像",
     "type": "bool",
     "default": false,
-    "hint": "QQ 适配器中允许 /hajimi 使用 @用户头像作为参考图"
+    "hint": "QQ 适配器中允许 /hajimi 或 /kkt 使用 @用户头像作为参考图"
   },
   "cleanup_delay": {
     "description": "临时文件清理延迟秒数",

@@ -15,20 +15,17 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, register
+from astrbot.core.star.filter.command import GreedyStr
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 
-def build_help_text(command: str, aliases: list[str], allow_without_slash: bool) -> str:
-    """Build the command help text from the active configuration."""
-    prefix = f"/{command}" if not allow_without_slash else f"/{command} 或 {command}"
-    alias_text = "、".join(f"/{alias}" for alias in aliases) if aliases else "无"
+def build_help_text() -> str:
+    """Build the help text for the fixed image commands."""
     return (
         "Hajimi 图片生成\n"
-        f"用法：{prefix} <提示词>\n"
-        f"回复图片后：{prefix} <编辑提示词>\n"
-        f"帮助：{prefix}帮助\n"
-        f"当前唤醒词：{command}\n"
-        f"可用别名：{alias_text}\n"
+        "用法：/hajimi <提示词> 或 /kkt <提示词>\n"
+        "回复图片后：/hajimi <编辑提示词> 或 /kkt <编辑提示词>\n"
+        "帮助：/hajimi help 或 /kkt help\n"
         "支持文生图、回复图片编辑和 @用户头像参考图。"
     )
 
@@ -45,10 +42,6 @@ class KktImagePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         config = config or {}
-        configured_command = str(config.get("command", "hajimi")).strip().lower()
-        self.command = configured_command if re.fullmatch(r"[a-z0-9_\-]+", configured_command) else "hajimi"
-        self.aliases = [alias for alias in self._parse_words(config.get("aliases", [])) if alias != self.command]
-        self.allow_without_slash = bool(config.get("allow_without_slash", False))
         self.group_blacklist = self._parse_group_ids(config.get("group_blacklist", []))
         self.api_base = str(
             config.get("api_base", "https://newapi.qianqianye.com/v1")
@@ -66,13 +59,9 @@ class KktImagePlugin(Star):
         self.cleanup_delay = max(5, int(config.get("cleanup_delay", 15)))
         self.temp_dir = Path(get_astrbot_data_path()) / "plugin_data" / "kkt"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self._help_text = build_help_text(self.command, self.aliases, self.allow_without_slash)
+        self._help_text = build_help_text()
         logger.info(
-            "[kkt] 插件已加载: command=/%s aliases=%s allow_without_slash=%s "
-            "blacklist_count=%d model=%s endpoint=%s",
-            self.command,
-            self.aliases,
-            self.allow_without_slash,
+            "[kkt] 插件已加载: commands=/hajimi,/kkt blacklist_count=%d model=%s endpoint=%s",
             len(self.group_blacklist),
             self.model,
             f"{self.api_base}/chat/completions",
@@ -101,39 +90,21 @@ class KktImagePlugin(Star):
             if re.fullmatch(r"\d+", group_id.strip())
         }
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def handle_message(self, event: AstrMessageEvent):
+    @filter.command("hajimi", alias={"kkt"})
+    async def handle_command(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             logger.debug("[kkt] 忽略黑名单群消息: group_id=%s", group_id)
             return
 
-        raw = (event.message_str or "").strip()
-        logger.debug(
-            "[kkt] 收到消息: group_id=%s sender_id=%s message=%r components=%d",
-            group_id or "private",
-            event.get_sender_id(),
-            raw[:200],
-            len(event.get_messages()),
-        )
-        command_pattern = "|".join(re.escape(word) for word in [self.command, *self.aliases])
-        prefix = r"/?" if self.allow_without_slash else r"/"
-        command_match = re.match(
-            rf"^{prefix}(?:{command_pattern})(?:帮助|help|\?)?(?:\s+([\s\S]*))?$",
-            raw,
-            re.IGNORECASE,
-        )
-        if not command_match:
-            return
-
+        prompt = prompt.strip()
         logger.info(
             "[kkt] 指令匹配: command=%s prompt=%r",
-            raw.split()[0] if raw.split() else raw,
-            (command_match.group(1) or "").strip()[:200],
+            event.get_message_str().split()[0] if event.get_message_str().split() else "",
+            prompt[:200],
         )
         event.stop_event()
-        prompt = (command_match.group(1) or "").strip()
-        if prompt.lower() in {"帮助", "help", "?"}:
+        if not prompt or prompt.lower() in {"帮助", "help", "?"}:
             prompt = ""
         if not prompt:
             yield event.plain_result(self._help_text)
