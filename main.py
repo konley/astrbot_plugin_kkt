@@ -35,7 +35,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.6.5",
+    "0.6.6",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -404,26 +404,8 @@ class KktImagePlugin(Star):
         )
 
     def _format_sensitive_status(self) -> str:
-        """本地审核状态文案。"""
-        state = "开" if self.sensitive_filter_enabled else "关"
-        cats = sorted(self._sensitive_words_by_cat.keys())
-        if self.sensitive_categories:
-            cat_line = "、".join(self.sensitive_categories)
-        elif cats:
-            cat_line = "、".join(cats)
-        else:
-            cat_line = "（未加载）"
-        lines = [
-            f"本地审核：{state}",
-            f"词条：{self._sensitive_word_count}",
-            f"类别：{cat_line}",
-        ]
-        if self.sensitive_filter_enabled and self._sensitive_word_count <= 0:
-            lines.append(
-                "提示：词库未加载或为空，请检查 Sensitive-lexicon 目录"
-            )
-        lines.append("开关：/kkt审核 开|关（仅管理员）")
-        return "\n".join(lines)
+        """群聊可见：仅一行开/关，不暴露词条与类别。"""
+        return f"本地审核：{'开' if self.sensitive_filter_enabled else '关'}"
 
     @staticmethod
     def _parse_sensitive_toggle_arg(text: str) -> bool | None:
@@ -1058,22 +1040,20 @@ class KktImagePlugin(Star):
             return
 
         if not self._is_admin(event):
-            yield event.plain_result(
-                "仅管理员可开关本地审核。\n" + self._format_sensitive_status()
-            )
+            yield event.plain_result("仅管理员可开关本地审核。")
             return
 
         old = self.sensitive_filter_enabled
         self._save_sensitive_filter_enabled(toggle)
-        head = f"本地审核：{'开' if old else '关'} → {'开' if toggle else '关'}"
         logger.info(
-            "[kkt] 管理员切换本地审核: operator=%s old=%s new=%s words=%d",
+            "[kkt] 管理员切换本地审核: operator=%s old=%s new=%s words=%d cats=%s",
             event.get_sender_id(),
             old,
             toggle,
             self._sensitive_word_count,
+            sorted(self._sensitive_words_by_cat.keys()),
         )
-        yield event.plain_result(head + "\n" + self._format_sensitive_status())
+        yield event.plain_result(self._format_sensitive_status())
 
     def _detect_command_name(self, event: AstrMessageEvent) -> str:
         """从消息中识别触发的主指令名（hajimi / kkt / image2）。"""
@@ -1216,23 +1196,18 @@ class KktImagePlugin(Star):
                 )
                 return
             if not self._is_admin(event):
-                yield event.plain_result(
-                    "仅管理员可开关本地审核。\n"
-                    + self._format_sensitive_status()
-                )
+                yield event.plain_result("仅管理员可开关本地审核。")
                 return
             old = self.sensitive_filter_enabled
             self._save_sensitive_filter_enabled(toggle)
-            head = (
-                f"本地审核：{'开' if old else '关'} → {'开' if toggle else '关'}"
-            )
             logger.info(
-                "[kkt] 管理员切换本地审核(主指令参数): operator=%s old=%s new=%s",
+                "[kkt] 管理员切换本地审核(主指令参数): operator=%s old=%s new=%s words=%d",
                 event.get_sender_id(),
                 old,
                 toggle,
+                self._sensitive_word_count,
             )
-            yield event.plain_result(head + "\n" + self._format_sensitive_status())
+            yield event.plain_result(self._format_sensitive_status())
             return
 
         # 先收集引用图文，再判断 help。

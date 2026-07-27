@@ -423,15 +423,19 @@ def test_parse_sensitive_toggle_arg():
     assert Plugin._parse_sensitive_toggle_arg("乱写") is None
 
 
-def test_format_sensitive_status_contains_switch_hint():
+def test_format_sensitive_status_is_one_line_only():
     plugin = object.__new__(Plugin)
     plugin.sensitive_filter_enabled = False
-    plugin._sensitive_word_count = 0
-    plugin._sensitive_words_by_cat = {}
+    plugin._sensitive_word_count = 999
+    plugin._sensitive_words_by_cat = {"政治": ["x"]}
     plugin.sensitive_categories = ["政治"]
     text = plugin._format_sensitive_status()
-    assert "本地审核：关" in text
-    assert "/kkt审核" in text
+    assert text == "本地审核：关"
+    assert "词条" not in text
+    assert "类别" not in text
+    assert "政治" not in text
+    plugin.sensitive_filter_enabled = True
+    assert plugin._format_sensitive_status() == "本地审核：开"
 
 
 class _UserEvent(FakeEvent):
