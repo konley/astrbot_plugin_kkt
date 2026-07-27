@@ -27,7 +27,7 @@ def build_help_text() -> str:
         "康康图\n"
         "用法：/kkt|/hajimi|/image2 <提示词>\n"
         "回复图可编辑；image2 仅 1 张参考图\n"
-        "多图合图请用 /hajimi；额度：/kkt额度"
+        "额度：/kkt额度；审核开关：/kkt审核"
     )
 
 
@@ -35,7 +35,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.6.4",
+    "0.6.5",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -166,8 +166,12 @@ class KktImagePlugin(Star):
         self.quota_path = self.temp_dir / "daily_quota.json"
         self.quota_limit_override_path = self.temp_dir / "daily_quota_limit.json"
         # 本地 Sensitive-lexicon 前置审核（默认关；词库不随插件分发）
-        self.sensitive_filter_enabled = bool(
+        # WebUI 为默认值；管理员指令可 runtime 覆盖并持久化
+        self._sensitive_filter_config_default = bool(
             config.get("sensitive_filter_enabled", False)
+        )
+        self.sensitive_filter_override_path = (
+            self.temp_dir / "sensitive_filter_enabled.json"
         )
         lexicon_path = str(config.get("sensitive_lexicon_path", "") or "").strip()
         self.sensitive_lexicon_path = (
@@ -183,9 +187,10 @@ class KktImagePlugin(Star):
         self._quota_lock = asyncio.Lock()
         self.daily_quota = self._load_daily_quota_limit()
         self._help_text = build_help_text()
-        # category -> sorted words (long first)；仅 enabled 时加载
+        # category -> sorted words (long first)；开启时加载
         self._sensitive_words_by_cat: dict[str, list[str]] = {}
         self._sensitive_word_count = 0
+        self.sensitive_filter_enabled = self._load_sensitive_filter_enabled()
         if self.sensitive_filter_enabled:
             self._load_sensitive_lexicon()
         logger.info(
@@ -361,6 +366,106 @@ class KktImagePlugin(Star):
             len(prompt or ""),
         )
         return self._SENSITIVE_REJECT_USER_MSG
+
+    def _load_sensitive_filter_enabled(self) -> bool:
+        """读取运行时审核开关；无覆盖文件则用 WebUI 默认。"""
+        try:
+            path = self.sensitive_filter_override_path
+            if not path.exists():
+                return self._sensitive_filter_config_default
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or "enabled" not in data:
+                return self._sensitive_filter_config_default
+            return bool(data.get("enabled"))
+        except Exception as exc:
+            logger.warning("[kkt] 读取审核开关覆盖失败，回退配置默认: %s", exc)
+            return self._sensitive_filter_config_default
+
+    def _save_sensitive_filter_enabled(self, enabled: bool) -> None:
+        """持久化运行时审核开关（不改 WebUI 配置文件）。"""
+        enabled = bool(enabled)
+        payload = {
+            "enabled": enabled,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "command",
+        }
+        self.sensitive_filter_override_path.parent.mkdir(parents=True, exist_ok=True)
+        self.sensitive_filter_override_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.sensitive_filter_enabled = enabled
+        if enabled and not self._sensitive_words_by_cat:
+            self._load_sensitive_lexicon()
+        logger.info(
+            "[kkt] 本地审核开关已更新: enabled=%s words=%d",
+            enabled,
+            self._sensitive_word_count,
+        )
+
+    def _format_sensitive_status(self) -> str:
+        """本地审核状态文案。"""
+        state = "开" if self.sensitive_filter_enabled else "关"
+        cats = sorted(self._sensitive_words_by_cat.keys())
+        if self.sensitive_categories:
+            cat_line = "、".join(self.sensitive_categories)
+        elif cats:
+            cat_line = "、".join(cats)
+        else:
+            cat_line = "（未加载）"
+        lines = [
+            f"本地审核：{state}",
+            f"词条：{self._sensitive_word_count}",
+            f"类别：{cat_line}",
+        ]
+        if self.sensitive_filter_enabled and self._sensitive_word_count <= 0:
+            lines.append(
+                "提示：词库未加载或为空，请检查 Sensitive-lexicon 目录"
+            )
+        lines.append("开关：/kkt审核 开|关（仅管理员）")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_sensitive_toggle_arg(text: str) -> bool | None:
+        """解析审核开关参数。空=查询；开/关=True/False；无法识别返回 None。"""
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        normalized = re.sub(r"\s+", "", raw).casefold()
+        # 去掉可能的前缀「审核」
+        normalized = re.sub(
+            r"^(?:审核|过滤|敏感词|sensitive|filter|moderation)",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if normalized in {
+            "开",
+            "开启",
+            "启用",
+            "打开",
+            "on",
+            "enable",
+            "enabled",
+            "true",
+            "1",
+        }:
+            return True
+        if normalized in {
+            "关",
+            "关闭",
+            "停用",
+            "off",
+            "disable",
+            "disabled",
+            "false",
+            "0",
+        }:
+            return False
+        # 整词就是 开/关 已覆盖；带前缀时上面已 strip
+        if raw in {"开", "关"}:
+            return raw == "开"
+        return None
 
     @staticmethod
     def _parse_secret_list(value) -> list[str]:
@@ -906,6 +1011,70 @@ class KktImagePlugin(Star):
         )
         yield event.plain_result(text)
 
+    @filter.command(
+        "kkt审核",
+        alias={
+            "hajimi审核",
+            "image2审核",
+            "kkt过滤",
+            "hajimi过滤",
+            "image2过滤",
+            "kktsensitive",
+            "hajimisensitive",
+            "image2sensitive",
+        },
+    )
+    async def handle_sensitive_toggle(
+        self, event: AstrMessageEvent, arg: GreedyStr = ""
+    ):
+        """查看或开关本地敏感词审核。
+
+        - /kkt审核 -> 查询
+        - /kkt审核 开|关 -> 仅管理员
+        """
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id and group_id in self.group_blacklist:
+            return
+        event.stop_event()
+
+        raw_arg = str(arg or "").strip()
+        if not raw_arg:
+            msg = (event.get_message_str() or "").strip()
+            raw_arg = re.sub(
+                r"(?i)^/?(?:kkt|hajimi|image2)(?:审核|过滤|sensitive)\s*",
+                "",
+                msg,
+            ).strip()
+
+        if not raw_arg:
+            yield event.plain_result(self._format_sensitive_status())
+            return
+
+        toggle = self._parse_sensitive_toggle_arg(raw_arg)
+        if toggle is None:
+            yield event.plain_result(
+                "参数无效。查询：/kkt审核；开关：/kkt审核 开|关"
+            )
+            return
+
+        if not self._is_admin(event):
+            yield event.plain_result(
+                "仅管理员可开关本地审核。\n" + self._format_sensitive_status()
+            )
+            return
+
+        old = self.sensitive_filter_enabled
+        self._save_sensitive_filter_enabled(toggle)
+        head = f"本地审核：{'开' if old else '关'} → {'开' if toggle else '关'}"
+        logger.info(
+            "[kkt] 管理员切换本地审核: operator=%s old=%s new=%s words=%d",
+            event.get_sender_id(),
+            old,
+            toggle,
+            self._sensitive_word_count,
+        )
+        yield event.plain_result(head + "\n" + self._format_sensitive_status())
+
     def _detect_command_name(self, event: AstrMessageEvent) -> str:
         """从消息中识别触发的主指令名（hajimi / kkt / image2）。"""
         raw = (event.get_message_str() or "").strip()
@@ -1028,6 +1197,42 @@ class KktImagePlugin(Star):
                 f"已清零今日已用（上限 {self.daily_quota}）\n"
                 + self._format_quota_status(event)
             )
+            return
+
+        # 兼容：/kkt 审核、/kkt 审核 开|关
+        if normalized in {"审核", "过滤", "sensitive", "moderation"}:
+            yield event.plain_result(self._format_sensitive_status())
+            return
+        sens_match = re.fullmatch(
+            r"(?:审核|过滤|sensitive|moderation)\s*(?:=|：|:)?\s*(.+)",
+            prompt_stripped,
+            flags=re.IGNORECASE,
+        )
+        if sens_match:
+            toggle = self._parse_sensitive_toggle_arg(sens_match.group(1))
+            if toggle is None:
+                yield event.plain_result(
+                    "参数无效。查询：/kkt审核；开关：/kkt审核 开|关"
+                )
+                return
+            if not self._is_admin(event):
+                yield event.plain_result(
+                    "仅管理员可开关本地审核。\n"
+                    + self._format_sensitive_status()
+                )
+                return
+            old = self.sensitive_filter_enabled
+            self._save_sensitive_filter_enabled(toggle)
+            head = (
+                f"本地审核：{'开' if old else '关'} → {'开' if toggle else '关'}"
+            )
+            logger.info(
+                "[kkt] 管理员切换本地审核(主指令参数): operator=%s old=%s new=%s",
+                event.get_sender_id(),
+                old,
+                toggle,
+            )
+            yield event.plain_result(head + "\n" + self._format_sensitive_status())
             return
 
         # 先收集引用图文，再判断 help。

@@ -414,6 +414,26 @@ def test_find_sensitive_hit_prefers_longer_word():
     assert hit == ("政治", "测试词加长版")
 
 
+def test_parse_sensitive_toggle_arg():
+    assert Plugin._parse_sensitive_toggle_arg("") is None
+    assert Plugin._parse_sensitive_toggle_arg("开") is True
+    assert Plugin._parse_sensitive_toggle_arg("关闭") is False
+    assert Plugin._parse_sensitive_toggle_arg("on") is True
+    assert Plugin._parse_sensitive_toggle_arg("OFF") is False
+    assert Plugin._parse_sensitive_toggle_arg("乱写") is None
+
+
+def test_format_sensitive_status_contains_switch_hint():
+    plugin = object.__new__(Plugin)
+    plugin.sensitive_filter_enabled = False
+    plugin._sensitive_word_count = 0
+    plugin._sensitive_words_by_cat = {}
+    plugin.sensitive_categories = ["政治"]
+    text = plugin._format_sensitive_status()
+    assert "本地审核：关" in text
+    assert "/kkt审核" in text
+
+
 class _UserEvent(FakeEvent):
     def __init__(self, sender_id="10001", admin=False):
         super().__init__([], "")

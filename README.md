@@ -318,9 +318,21 @@ git clone https://github.com/konsheng/Sensitive-lexicon.git
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
-| `sensitive_filter_enabled` | `false` | 总开关 |
+| `sensitive_filter_enabled` | `false` | WebUI 默认总开关 |
 | `sensitive_lexicon_path` | 空 | 空则用 `data/plugin_data/kkt/Sensitive-lexicon` |
 | `sensitive_categories` | `[]` | 空=全部已映射类别；可多选如 `政治`、`暴恐`、`色情` |
+
+### 指令开关（运行时，仅管理员可改）
+
+```text
+/kkt审核              # 查询状态（全员可查）
+/kkt审核 开           # 开启本地审核
+/kkt审核 关           # 关闭
+/hajimi审核 开        # 同义
+/image2审核 关
+```
+
+开关会写入 `data/plugin_data/kkt/sensitive_filter_enabled.json`，重载后仍生效；**不修改** WebUI 里的默认配置项。开启时若词库尚未加载会立即加载。
 
 类别与文件对应见 WebUI 配置 hint。建议先只启用 `政治` 观察误杀，再按需加类。
 
