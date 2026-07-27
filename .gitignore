@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+# 敏感词库不随仓库分发（用户自行下载 Sensitive-lexicon）
+Sensitive-lexicon/
+**/Sensitive-lexicon/

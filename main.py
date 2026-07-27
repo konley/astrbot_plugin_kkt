@@ -35,10 +35,32 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.6.3",
+    "0.6.4",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
+
+    # Sensitive-lexicon Vocabulary 文件名 → WebUI 可选类别名
+    _LEXICON_FILE_TO_CATEGORY: dict[str, str] = {
+        "政治类型.txt": "政治",
+        "反动词库.txt": "反动",
+        "贪腐词库.txt": "贪腐",
+        "暴恐词库.txt": "暴恐",
+        "涉枪涉爆.txt": "涉枪涉爆",
+        "色情类型.txt": "色情",
+        "色情词库.txt": "色情",
+        "广告类型.txt": "广告",
+        "民生词库.txt": "民生",
+        "COVID-19词库.txt": "COVID-19",
+        "GFW补充词库.txt": "GFW",
+        "非法网址.txt": "非法网址",
+        "补充词库.txt": "补充",
+        "其他词库.txt": "其他",
+        "新思想启蒙.txt": "新思想",
+        "网易前端过滤敏感词库.txt": "网易综合",
+        "零时-Tencent.txt": "腾讯综合",
+    }
+    _SENSITIVE_REJECT_USER_MSG = "内容审核未通过，请修改提示词后重试。"
 
     # 匹配指令名后的参数；支持 /kkt帮助、/image2 help 等
     _CMD_ARG_RE = re.compile(
@@ -143,18 +165,37 @@ class KktImagePlugin(Star):
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.quota_path = self.temp_dir / "daily_quota.json"
         self.quota_limit_override_path = self.temp_dir / "daily_quota_limit.json"
+        # 本地 Sensitive-lexicon 前置审核（默认关；词库不随插件分发）
+        self.sensitive_filter_enabled = bool(
+            config.get("sensitive_filter_enabled", False)
+        )
+        lexicon_path = str(config.get("sensitive_lexicon_path", "") or "").strip()
+        self.sensitive_lexicon_path = (
+            Path(lexicon_path).expanduser()
+            if lexicon_path
+            else (self.temp_dir / "Sensitive-lexicon")
+        )
+        self.sensitive_categories = self._parse_category_list(
+            config.get("sensitive_categories", [])
+        )
         # 内存：sender_id -> 上次成功触发生图的 monotonic 时间
         self._user_last_call: dict[str, float] = {}
         self._quota_lock = asyncio.Lock()
         self.daily_quota = self._load_daily_quota_limit()
         self._help_text = build_help_text()
+        # category -> sorted words (long first)；仅 enabled 时加载
+        self._sensitive_words_by_cat: dict[str, list[str]] = {}
+        self._sensitive_word_count = 0
+        if self.sensitive_filter_enabled:
+            self._load_sensitive_lexicon()
         logger.info(
             "[kkt] 插件已加载: commands=/hajimi,/kkt,/image2 blacklist_count=%d "
             "model=%s image2_model=%s image2_key=%s main_keys=%d image2_keys=%d "
             "endpoint=%s image2_mode=%s image2_size=%s "
             "reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
             "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s "
-            "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d",
+            "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d "
+            "sensitive_filter=%s sensitive_words=%d sensitive_cats=%s lexicon=%s",
             len(self.group_blacklist),
             self.model,
             self.image2_model,
@@ -178,6 +219,10 @@ class KktImagePlugin(Star):
             self.prefer_chinese_text,
             self.prefer_cn_locale,
             len(self.style_prompt),
+            self.sensitive_filter_enabled,
+            self._sensitive_word_count,
+            sorted(self._sensitive_words_by_cat.keys()) or "(none)",
+            str(self.sensitive_lexicon_path),
         )
         self._cleanup_stale_files()
 
@@ -191,6 +236,131 @@ class KktImagePlugin(Star):
             group_id.strip() for group_id in map(str, value)
             if re.fullmatch(r"\d+", group_id.strip())
         }
+
+    @classmethod
+    def _parse_category_list(cls, value) -> list[str]:
+        """WebUI list / 逗号分隔 → 去重保序的类别名。"""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.replace("，", ",").replace("\r\n", "\n").replace("\r", "\n")
+            parts = re.split(r"[\n,;|]+", text)
+        elif isinstance(value, list):
+            parts = [str(item) for item in value]
+        else:
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for part in parts:
+            name = str(part or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            out.append(name)
+        return out
+
+    def _resolve_lexicon_files(self) -> list[Path]:
+        """解析要加载的 Vocabulary/*.txt；categories 空=全部已知映射文件。"""
+        root = self.sensitive_lexicon_path
+        vocab = root / "Vocabulary"
+        if not vocab.is_dir():
+            # 允许用户直接把 txt 放在词库根目录
+            if root.is_dir():
+                vocab = root
+            else:
+                return []
+        selected = set(self.sensitive_categories)
+        files: list[Path] = []
+        for path in sorted(vocab.glob("*.txt")):
+            cat = self._LEXICON_FILE_TO_CATEGORY.get(path.name)
+            if cat is None:
+                # 未知文件名：仅在「未选类别=全部」时加载
+                if selected:
+                    continue
+                cat = path.stem
+            if selected and cat not in selected:
+                continue
+            files.append(path)
+        return files
+
+    def _load_sensitive_lexicon(self) -> None:
+        """从 Sensitive-lexicon 加载词条到内存（按类；词按长度降序便于先匹配长词）。"""
+        by_cat: dict[str, set[str]] = {}
+        files = self._resolve_lexicon_files()
+        if not files:
+            logger.warning(
+                "[kkt] 敏感词过滤已开启但未找到词库文件: path=%s categories=%s "
+                "请从 https://github.com/konsheng/Sensitive-lexicon 下载并放到该目录 "
+                "(需含 Vocabulary/*.txt)",
+                self.sensitive_lexicon_path,
+                self.sensitive_categories or "(全部)",
+            )
+            self._sensitive_words_by_cat = {}
+            self._sensitive_word_count = 0
+            return
+        for path in files:
+            cat = self._LEXICON_FILE_TO_CATEGORY.get(path.name, path.stem)
+            bucket = by_cat.setdefault(cat, set())
+            try:
+                text = path.read_text(encoding="utf-8-sig", errors="ignore")
+            except OSError as exc:
+                logger.warning("[kkt] 读取词库失败: file=%s err=%s", path, exc)
+                continue
+            for line in text.splitlines():
+                word = line.strip()
+                if not word or word.startswith("#"):
+                    continue
+                # 过短单字极易误杀，跳过长度 < 2
+                if len(word) < 2:
+                    continue
+                bucket.add(word)
+        self._sensitive_words_by_cat = {
+            cat: sorted(words, key=len, reverse=True)
+            for cat, words in by_cat.items()
+            if words
+        }
+        self._sensitive_word_count = sum(
+            len(words) for words in self._sensitive_words_by_cat.values()
+        )
+        logger.info(
+            "[kkt] 敏感词库已加载: files=%d categories=%s words=%d path=%s",
+            len(files),
+            sorted(self._sensitive_words_by_cat.keys()),
+            self._sensitive_word_count,
+            self.sensitive_lexicon_path,
+        )
+
+    def _find_sensitive_hit(self, text: str) -> tuple[str, str] | None:
+        """返回 (category, word)；未命中 None。先长词后短词。"""
+        body = (text or "").strip()
+        if not body or not self._sensitive_words_by_cat:
+            return None
+        # 统一小写便于匹配英文缩写
+        haystack = body.casefold()
+        for cat, words in self._sensitive_words_by_cat.items():
+            for word in words:
+                needle = word.casefold()
+                if needle and needle in haystack:
+                    return cat, word
+        return None
+
+    def _check_sensitive_prompt(self, prompt: str) -> str | None:
+        """开启过滤时检查 prompt；命中则写日志并返回用户文案。"""
+        if not self.sensitive_filter_enabled:
+            return None
+        if not self._sensitive_words_by_cat:
+            return None
+        hit = self._find_sensitive_hit(prompt)
+        if not hit:
+            return None
+        cat, word = hit
+        logger.warning(
+            "[kkt] 敏感词拦截: category=%s keyword=%s prompt_length=%d",
+            cat,
+            word,
+            len(prompt or ""),
+        )
+        return self._SENSITIVE_REJECT_USER_MSG
 
     @staticmethod
     def _parse_secret_list(value) -> list[str]:
@@ -883,6 +1053,12 @@ class KktImagePlugin(Star):
         )
         if not prompt and not image_items:
             yield event.plain_result(self._help_text)
+            return
+
+        # 本地 Sensitive-lexicon：三通道共用；命中则不请求、不扣配额
+        sensitive_msg = self._check_sensitive_prompt(prompt)
+        if sensitive_msg:
+            yield event.plain_result(sensitive_msg)
             return
 
         creds = self._resolve_api_credentials(command)

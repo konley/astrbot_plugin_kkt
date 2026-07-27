@@ -379,6 +379,41 @@ def test_should_use_images_api_modes():
     assert plugin._should_use_images_api("image2", "gemini-flash") is False
 
 
+def test_parse_category_list():
+    assert Plugin._parse_category_list(["政治", "暴恐", "政治"]) == ["政治", "暴恐"]
+    assert Plugin._parse_category_list("政治, 色情") == ["政治", "色情"]
+    assert Plugin._parse_category_list(None) == []
+
+
+def test_sensitive_filter_hit_and_user_message_hides_keyword():
+    plugin = object.__new__(Plugin)
+    plugin.sensitive_filter_enabled = True
+    plugin._sensitive_words_by_cat = {"政治": ["测试敏感词ABC", "短"]}
+    plugin._SENSITIVE_REJECT_USER_MSG = Plugin._SENSITIVE_REJECT_USER_MSG
+    msg = plugin._check_sensitive_prompt("请画测试敏感词ABC场景")
+    assert msg == Plugin._SENSITIVE_REJECT_USER_MSG
+    assert "测试敏感词ABC" not in msg
+    assert plugin._check_sensitive_prompt("一只普通的猫") is None
+
+
+def test_sensitive_filter_disabled_skips():
+    plugin = object.__new__(Plugin)
+    plugin.sensitive_filter_enabled = False
+    plugin._sensitive_words_by_cat = {"政治": ["测试敏感词ABC"]}
+    assert plugin._check_sensitive_prompt("请画测试敏感词ABC") is None
+
+
+def test_find_sensitive_hit_prefers_longer_word():
+    plugin = object.__new__(Plugin)
+    plugin._sensitive_words_by_cat = {"政治": ["测试词", "测试词加长版"]}
+    # 列表应按长度降序；模拟加载结果
+    plugin._sensitive_words_by_cat = {
+        "政治": sorted(["测试词", "测试词加长版"], key=len, reverse=True)
+    }
+    hit = plugin._find_sensitive_hit("出现测试词加长版即可")
+    assert hit == ("政治", "测试词加长版")
+
+
 class _UserEvent(FakeEvent):
     def __init__(self, sender_id="10001", admin=False):
         super().__init__([], "")

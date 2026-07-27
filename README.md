@@ -299,6 +299,31 @@ enable_at_avatar = true
 
 私聊不受群黑名单影响。
 
+## 本地敏感词过滤（Sensitive-lexicon）
+
+默认**关闭**。开启后对 `/kkt` `/hajimi` `/image2` 三通道的提示词做本地关键词拦截：命中则提示「内容审核未通过」，**不请求上游、不扣日配额**。用户侧不展示命中词；日志会记录 `category` 与 `keyword`。
+
+### 下载词库（不随插件分发）
+
+```bash
+# 推荐放到插件数据目录
+cd /path/to/AstrBot/data/plugin_data/kkt
+git clone https://github.com/konsheng/Sensitive-lexicon.git
+```
+
+仓库：https://github.com/konsheng/Sensitive-lexicon  
+需要目录内有 `Vocabulary/*.txt`（如 `政治类型.txt`）。
+
+### 相关配置
+
+| 配置项 | 默认 | 说明 |
+|---|---|---|
+| `sensitive_filter_enabled` | `false` | 总开关 |
+| `sensitive_lexicon_path` | 空 | 空则用 `data/plugin_data/kkt/Sensitive-lexicon` |
+| `sensitive_categories` | `[]` | 空=全部已映射类别；可多选如 `政治`、`暴恐`、`色情` |
+
+类别与文件对应见 WebUI 配置 hint。建议先只启用 `政治` 观察误杀，再按需加类。
+
 ## 全部配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
@@ -314,6 +339,9 @@ enable_at_avatar = true
 | `enable_reply_image` | bool | `true` | 是否读取引用消息中的图片 |
 | `enable_at_avatar` | bool | `false` | 是否允许使用 @用户头像 |
 | `cleanup_delay` | int | `15` | 图片发送后清理临时文件的延迟秒数 |
+| `sensitive_filter_enabled` | bool | `false` | 本地敏感词过滤总开关 |
+| `sensitive_lexicon_path` | string | 空 | Sensitive-lexicon 根目录 |
+| `sensitive_categories` | list | `[]` | 启用类别（空=全部） |
 
 ## 处理规则总结
 

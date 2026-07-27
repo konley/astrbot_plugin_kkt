@@ -168,5 +168,23 @@
     "type": "int",
     "default": 15,
     "hint": "发送图片后等待一段时间再删除本地文件"
+  },
+  "sensitive_filter_enabled": {
+    "description": "本地敏感词过滤",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关闭。开启后对 /kkt /hajimi /image2 的提示词做本地关键词拦截（命中不请求上游）。词库需自行下载：https://github.com/konsheng/Sensitive-lexicon 克隆到下方路径（需含 Vocabulary/*.txt）。插件不附带词库。"
+  },
+  "sensitive_lexicon_path": {
+    "description": "Sensitive-lexicon 目录",
+    "type": "string",
+    "default": "",
+    "hint": "留空= data/plugin_data/kkt/Sensitive-lexicon 。下载：git clone https://github.com/konsheng/Sensitive-lexicon.git 到该目录。不要把词库提交进插件仓库。"
+  },
+  "sensitive_categories": {
+    "description": "启用的词库类别(可多选)",
+    "type": "list",
+    "default": [],
+    "hint": "空列表=加载 Vocabulary 下全部已映射类别。可填：政治、反动、贪腐、暴恐、涉枪涉爆、色情、广告、民生、COVID-19、GFW、非法网址、补充、其他、新思想、网易综合、腾讯综合。建议先只开「政治」观察误杀。"
   }
 }
