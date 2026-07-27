@@ -24,17 +24,10 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 def build_help_text() -> str:
     """Build the help text for the fixed image commands."""
     return (
-        "Hajimi 图片生成\n"
-        "用法：/hajimi <提示词> 或 /kkt <提示词>\n"
-        "image2：/image2 <提示词>（独立模型与 API Key；走 /images 接口）\n"
-        "回复图片后：/hajimi <编辑提示词> 或 /kkt <编辑提示词> 或 /image2 <编辑提示词>\n"
-        "说明：/image2 有参考图时走 images/edits（默认取第 1 张）；多图复杂编辑建议 /kkt\n"
-        "限额查询：/kkt额度 或 /hajimi额度 或 /image2额度（三通道共用一套日配额）\n"
-        "调整日限额（仅管理员，已用不变）：/kkt额度 10 或 /hajimi额度 10 或 /image2额度 10\n"
-        "关闭日限额：/kkt额度 0\n"
-        "重置今日已用（仅管理员）：/kkt重置额度 或 /kktresetquota\n"
-        "帮助：/hajimi help 或 /kkt help 或 /image2 help\n"
-        "支持文生图、回复图片编辑和 @用户头像参考图。"
+        "康康图\n"
+        "用法：/kkt|/hajimi|/image2 <提示词>\n"
+        "回复图可编辑；image2 仅 1 张参考图\n"
+        "多图合图请用 /hajimi；额度：/kkt额度"
     )
 
 
@@ -42,7 +35,7 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.6.1",
+    "0.6.3",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -341,8 +334,13 @@ class KktImagePlugin(Star):
             if len(emoji_ids) > 1:
                 await asyncio.sleep(0.5)
 
-    def _build_image_chain(self, event: AstrMessageEvent, image_path: str) -> list:
-        """组装出图消息链；可选前置 Reply 引用触发指令的消息。"""
+    def _build_image_chain(
+        self,
+        event: AstrMessageEvent,
+        image_path: str,
+        elapsed_seconds: int | None = None,
+    ) -> list:
+        """组装出图消息链；可选前置 Reply，并附带耗时文案。"""
         chain: list = []
         if self.reply_with_quote:
             message_id = self._extract_reaction_message_id(event)
@@ -350,6 +348,8 @@ class KktImagePlugin(Star):
                 chain.append(Comp.Reply(id=message_id))
             else:
                 logger.debug("[kkt] 引用回复跳过: 无法获取 message_id")
+        if elapsed_seconds is not None:
+            chain.append(Comp.Plain(f"生成耗时：{elapsed_seconds}秒，请查收喵"))
         chain.append(Comp.Image(file=str(image_path)))
         return chain
 
@@ -476,57 +476,36 @@ class KktImagePlugin(Star):
 
     def _format_quota_status(self, event: AstrMessageEvent | None = None) -> str:
         """生成限额状态文案（含日配额与当前用户 CD）。"""
-        today = date.today().isoformat()
         if self.daily_quota <= 0:
-            daily_line = "今日总配额：不限制（limit=0）"
             used = int(self._load_quota_state().get("count") or 0)
+            daily_line = "今日额度：不限制"
             if used:
-                daily_line += f"\n今日已用计数：{used}（关闭限额时仍保留统计）"
+                daily_line += f"（已用 {used}）"
         else:
             state = self._load_quota_state()
             used = int(state.get("count") or 0)
             remain = max(0, self.daily_quota - used)
-            daily_line = (
-                f"今日总配额：已用 {used}/{self.daily_quota}，剩余 {remain}\n"
-                f"统计日期：{state.get('date') or today}"
-            )
-
-        lines = [
-            "【Hajimi / kkt / image2 公用限额】",
-            daily_line,
-            f"配置默认限额：{self._daily_quota_config_default}"
-            + (
-                "（当前已被指令覆盖）"
-                if self.daily_quota != self._daily_quota_config_default
-                else ""
-            ),
-        ]
+            daily_line = f"今日额度：{used}/{self.daily_quota}（剩余 {remain}）"
 
         if self.cooldown_seconds <= 0:
-            lines.append("个人冷却：关闭")
+            cd_line = "冷却：关闭"
         elif event is not None and self._is_admin(event):
-            lines.append(f"个人冷却：{self.cooldown_seconds}s（你是管理员，不受限）")
+            cd_line = f"冷却：{self.cooldown_seconds}s（管理员免冷却）"
         elif event is not None:
             sender_id = str(event.get_sender_id() or "").strip()
             last = self._user_last_call.get(sender_id) if sender_id else None
             if last is None:
-                lines.append(f"个人冷却：{self.cooldown_seconds}s（当前可调用）")
+                cd_line = f"冷却：{self.cooldown_seconds}s"
             else:
                 remain_cd = self.cooldown_seconds - (time.monotonic() - last)
                 if remain_cd > 0:
-                    lines.append(
-                        f"个人冷却：还需等待 {int(remain_cd) + 1}s"
-                        f"（间隔 {self.cooldown_seconds}s）"
-                    )
+                    cd_line = f"冷却：还需 {int(remain_cd) + 1}s"
                 else:
-                    lines.append(f"个人冷却：{self.cooldown_seconds}s（当前可调用）")
+                    cd_line = f"冷却：{self.cooldown_seconds}s"
         else:
-            lines.append(f"个人冷却：{self.cooldown_seconds}s")
+            cd_line = f"冷却：{self.cooldown_seconds}s"
 
-        lines.append("超出日配额后仅管理员可继续生图。")
-        lines.append("管理员调限额（已用不变）：/kkt额度 10 或 /hajimi额度 10 或 /image2额度 10")
-        lines.append("管理员重置今日已用：/kkt重置额度 或 /kktresetquota")
-        return "\n".join(lines)
+        return f"{daily_line}\n{cd_line}"
 
     async def _set_daily_quota_limit(self, limit: int) -> dict:
         """设置日限额上限；不修改已用 count。"""
@@ -572,11 +551,7 @@ class KktImagePlugin(Star):
                         self.daily_quota,
                     )
                     return None
-                return (
-                    f"今日生图总配额已用完（{used}/{self.daily_quota}），"
-                    "请明天再试，或联系管理员。\n"
-                    "查询限额：/kkt额度"
-                )
+                return f"今日额度已用完（{used}/{self.daily_quota}）"
 
             state["count"] = used + 1
             state["date"] = date.today().isoformat()
@@ -696,13 +671,7 @@ class KktImagePlugin(Star):
         limit = self._parse_quota_limit_arg(raw_arg)
         # 有参数但解析不出合法数字
         if raw_arg and limit is None:
-            yield event.plain_result(
-                "额度参数无效。\n"
-                "查询：/kkt额度\n"
-                "管理员设置上限（已用不变）：/kkt额度 10\n"
-                "关闭日限额：/kkt额度 0\n"
-                "也可用 /hajimi额度 10 或 /image2额度 10（共用一套）"
-            )
+            yield event.plain_result("参数无效。查询：/kkt额度；设置：/kkt额度 10")
             return
 
         if limit is None:
@@ -711,7 +680,7 @@ class KktImagePlugin(Star):
 
         if not self._is_admin(event):
             yield event.plain_result(
-                "只有管理员可以调整日限额。\n" + self._format_quota_status(event)
+                "仅管理员可调整额度。\n" + self._format_quota_status(event)
             )
             return
 
@@ -720,18 +689,10 @@ class KktImagePlugin(Star):
         used = int(result["used"])
         new_limit = int(result["limit"])
         if new_limit <= 0:
-            head = (
-                f"已关闭日限额（limit=0）。已用次数保持为 {used}，"
-                "普通用户将不再受日配额拦截。"
-            )
+            head = f"已关闭日限额（已用 {used}）"
         else:
             remain = max(0, new_limit - used)
-            head = (
-                f"已将日限额从 {old_limit} 调整为 {new_limit}。"
-                f"已用次数不变：{used}/{new_limit}，剩余 {remain}。"
-            )
-            if used > new_limit:
-                head += "（当前已用已超过新上限，普通用户将无法继续，管理员仍可）"
+            head = f"日限额 {old_limit} → {new_limit}（已用 {used}，剩余 {remain}）"
         logger.info(
             "[kkt] 管理员调整日限额: operator=%s old=%d new=%d used=%d",
             event.get_sender_id(),
@@ -761,11 +722,11 @@ class KktImagePlugin(Star):
             return
         event.stop_event()
         if not self._is_admin(event):
-            yield event.plain_result("只有管理员可以重置今日已用次数。")
+            yield event.plain_result("仅管理员可重置额度。")
             return
         await self._reset_daily_quota()
         text = (
-            f"已将今日已用次数清零（日限额上限仍为 {self.daily_quota}）。\n"
+            f"已清零今日已用（上限 {self.daily_quota}）\n"
             + self._format_quota_status(event)
         )
         logger.info(
@@ -860,7 +821,7 @@ class KktImagePlugin(Star):
         if set_match:
             if not self._is_admin(event):
                 yield event.plain_result(
-                    "只有管理员可以调整日限额。\n" + self._format_quota_status(event)
+                    "仅管理员可调整额度。\n" + self._format_quota_status(event)
                 )
                 return
             new_limit = int(set_match.group(1))
@@ -868,15 +829,10 @@ class KktImagePlugin(Star):
             result = await self._set_daily_quota_limit(new_limit)
             used = int(result["used"])
             if new_limit <= 0:
-                head = (
-                    f"已关闭日限额（limit=0）。已用次数保持为 {used}。"
-                )
+                head = f"已关闭日限额（已用 {used}）"
             else:
                 remain = max(0, new_limit - used)
-                head = (
-                    f"已将日限额从 {old_limit} 调整为 {new_limit}。"
-                    f"已用次数不变：{used}/{new_limit}，剩余 {remain}。"
-                )
+                head = f"日限额 {old_limit} → {new_limit}（已用 {used}，剩余 {remain}）"
             logger.info(
                 "[kkt] 管理员调整日限额(主指令参数): operator=%s old=%d new=%d used=%d",
                 event.get_sender_id(),
@@ -895,11 +851,11 @@ class KktImagePlugin(Star):
             "reset",
         }:
             if not self._is_admin(event):
-                yield event.plain_result("只有管理员可以重置今日已用次数。")
+                yield event.plain_result("仅管理员可重置额度。")
                 return
             await self._reset_daily_quota()
             yield event.plain_result(
-                f"已将今日已用次数清零（日限额上限仍为 {self.daily_quota}）。\n"
+                f"已清零今日已用（上限 {self.daily_quota}）\n"
                 + self._format_quota_status(event)
             )
             return
@@ -936,6 +892,21 @@ class KktImagePlugin(Star):
             return
         api_base, api_keys, model = creds
 
+        # image2 + Images API：多参考图会静默丢弃，直接拦截以免浪费额度
+        if (
+            command == "image2"
+            and len(image_items) > 1
+            and self._should_use_images_api(command, model)
+        ):
+            reject_msg = self._format_image2_multi_ref_reject(image_items)
+            logger.info(
+                "[kkt] image2 多参考图拦截(不请求): count=%d labels=%s",
+                len(image_items),
+                [item.get("label") for item in image_items][:8],
+            )
+            yield event.plain_result(reject_msg)
+            return
+
         # per-user CD（管理员跳过）
         cd_msg = self._check_user_cooldown(event)
         if cd_msg:
@@ -953,6 +924,9 @@ class KktImagePlugin(Star):
 
         # 开始干活前先表情回应原消息（不阻塞生图）
         asyncio.create_task(self._send_reaction_emoji(event))
+        # 普通消息提示进度，不引用原消息
+        await event.send(event.plain_result("正在生成图片，马上就好喵"))
+        started_at = time.monotonic()
 
         try:
             logger.info(
@@ -982,12 +956,29 @@ class KktImagePlugin(Star):
             if not image_path:
                 yield event.plain_result("图片下载或解析失败，请稍后重试。")
                 return
-            logger.info("[kkt] 图片处理成功: path=%s", image_path)
-            yield event.chain_result(self._build_image_chain(event, image_path))
+            elapsed_seconds = max(1, int(round(time.monotonic() - started_at)))
+            logger.info(
+                "[kkt] 图片处理成功: path=%s elapsed=%ss",
+                image_path,
+                elapsed_seconds,
+            )
+            yield event.chain_result(
+                self._build_image_chain(
+                    event,
+                    image_path,
+                    elapsed_seconds=elapsed_seconds,
+                )
+            )
             self._schedule_cleanup(image_path)
         except Exception as exc:
             logger.error(f"[kkt] 图片生成失败: {exc}")
-            yield event.plain_result(f"图片生成失败：{exc}")
+            err_text = str(exc).strip() or "未知错误"
+            if err_text.startswith("上游拒绝生成："):
+                yield event.plain_result(
+                    err_text[len("上游拒绝生成：") :].strip() or err_text
+                )
+            else:
+                yield event.plain_result(f"图片生成失败：{err_text}")
 
     async def _collect_images(
         self, event: AstrMessageEvent
@@ -1234,6 +1225,27 @@ class KktImagePlugin(Star):
                 "imagen",  # 少数中转也挂在 images
             )
         )
+
+    @staticmethod
+    def _format_image2_multi_ref_reject(image_items: list[dict]) -> str:
+        """images 模式多参考图拦截文案：不请求 API、不扣额度。"""
+        total = len(image_items or [])
+        lines = [
+            f"/image2 当前为 Images edit模式，只支持 1 张参考图+文字说明（已收到 {total} 张）。"
+            "请只保留一张再试；多图合图请用哈基米 /hajimi。"
+        ]
+        labels = [
+            str(item.get("label") or "").strip()
+            for item in (image_items or [])
+            if str(item.get("label") or "").strip()
+        ]
+        if labels:
+            lines.append("已识别：")
+            for label in labels[:8]:
+                lines.append(f"· {label}")
+            if total > 8:
+                lines.append(f"· …共 {total} 张")
+        return "\n".join(lines)
 
     @staticmethod
     def _data_url_to_bytes(data_url: str) -> tuple[bytes, str, str]:
@@ -1495,7 +1507,9 @@ class KktImagePlugin(Star):
             else:
                 msg = str(err)
             return None, f"上游返回错误：{msg[:300]}"
-        return None, "API 响应中未找到图片"
+        return None, self._format_missing_image_error(
+            data if isinstance(data, dict) else {}
+        )
 
     @staticmethod
     def _is_non_retryable_api_error(message: str) -> bool:
@@ -1503,6 +1517,7 @@ class KktImagePlugin(Star):
         return (
             "Key 无效" in text
             or "权限" in text
+            or "上游拒绝生成" in text
             or "模型未返回图片，而是回复了文字" in text
             or "only supported on" in text.lower()
             or "不支持" in text
@@ -1647,13 +1662,12 @@ class KktImagePlugin(Star):
                                 (text_reply or "")[:300],
                                 raw[:300],
                             )
-                            if text_reply:
-                                raise RuntimeError(
-                                    f"模型未返回图片，而是回复了文字：{text_reply[:400]}"
-                                )
                             raise RuntimeError(
-                                "API 响应中未找到图片"
-                                + (f"（finish_reason={finish}）" if finish else "")
+                                self._format_missing_image_error(
+                                    data if isinstance(data, dict) else {},
+                                    text_reply=text_reply,
+                                    finish_reason=finish,
+                                )
                             )
                 except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
                     last_error = str(exc)
@@ -1663,7 +1677,10 @@ class KktImagePlugin(Star):
                         attempt + 1,
                         last_error[:300],
                     )
-                    if "模型未返回图片，而是回复了文字" in last_error:
+                    if (
+                        "上游拒绝生成" in last_error
+                        or "模型未返回图片，而是回复了文字" in last_error
+                    ):
                         raise RuntimeError(last_error) from exc
                     if key_failed_hard or self._should_switch_api_key(last_error):
                         # no channel / 401 等：不必在同 Key 内耗完重试
@@ -1693,6 +1710,54 @@ class KktImagePlugin(Star):
                 continue
             raise RuntimeError(last_error)
         return None
+
+    @classmethod
+    def _is_empty_upstream_response(cls, data: dict) -> bool:
+        """Detect empty shell response (content null/empty)."""
+        if not isinstance(data, dict):
+            return False
+        message = cls._message_from_response(data)
+        if not message:
+            choices = data.get("choices")
+            return True if choices is not None else not bool(data)
+        content = message.get("content", None)
+        if content is None:
+            return True
+        if isinstance(content, str) and not content.strip():
+            return True
+        if isinstance(content, list) and len(content) == 0:
+            return True
+        return False
+
+    @classmethod
+    def _format_missing_image_error(
+        cls,
+        data: dict,
+        *,
+        text_reply: str | None = None,
+        finish_reason: str | None = None,
+    ) -> str:
+        """User-facing missing-image error."""
+        reply = (
+            text_reply
+            if text_reply is not None
+            else cls._extract_text_reply(data)
+        ).strip()
+        finish = (
+            finish_reason
+            if finish_reason is not None
+            else cls._extract_finish_reason(data)
+        )
+        if reply:
+            return f"上游拒绝生成：{reply[:400]}"
+        if cls._is_empty_upstream_response(data):
+            suffix = f"（finish_reason={finish}）" if finish else ""
+            return (
+                "上游空响应（content 为空），可能被安全拦截，请换提示词后重试"
+                + suffix
+            )
+        suffix = f"（finish_reason={finish}）" if finish else ""
+        return "API 响应中未找到图片" + suffix
 
     @staticmethod
     def _message_from_response(data: dict) -> dict:

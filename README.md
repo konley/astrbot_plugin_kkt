@@ -68,8 +68,9 @@ image2_size = 1024x1024
 
 说明：
 
-- `image2_api_mode=images`（默认）：无参考图 → `/v1/images/generations`；有参考图 → `/v1/images/edits`（默认只用第 1 张）
-- `image2_api_mode=chat`：与 `/kkt` 一样走 `chat/completions`（仅当你的 image2 模型支持 chat 出图时）
+- `image2_api_mode=images`（默认）：无参考图 → `/v1/images/generations`；有参考图 → `/v1/images/edits`（仅 1 张）
+- **多参考图硬拦截**（images/auto→images）：收到 ≥2 张参考图时直接提示用法，**不请求上游、不扣日配额、不记 CD**
+- `image2_api_mode=chat`：与 `/kkt` 一样走 `chat/completions`（仅当你的 image2 模型支持 chat 出图时；多图不拦截）
 - `/hajimi` `/kkt` **始终**走 `chat/completions`，不受 `image2_api_mode` 影响
 
 默认配置：

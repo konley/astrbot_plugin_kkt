@@ -196,20 +196,22 @@ def test_resolve_api_credentials_image2_requires_own_key():
     plugin = object.__new__(Plugin)
     plugin.api_base = "https://example.com/v1"
     plugin.api_key = "default-key"
+    plugin.backup_api_keys = []
     plugin.model = "gemini-x"
     plugin.image2_api_base = "https://example.com/v1"
     plugin.image2_api_key = ""
+    plugin.image2_backup_api_keys = []
     plugin.image2_model = "gpt-image-2"
     err = plugin._resolve_api_credentials("image2")
     assert isinstance(err, str) and "image2" in err.lower()
 
     plugin.image2_api_key = "image2-only-key"
-    base, key, model = plugin._resolve_api_credentials("image2")
-    assert key == "image2-only-key"
+    base, keys, model = plugin._resolve_api_credentials("image2")
+    assert keys == ["image2-only-key"]
     assert model == "gpt-image-2"
     # 默认通道不碰 image2 key
-    base2, key2, model2 = plugin._resolve_api_credentials("kkt")
-    assert key2 == "default-key"
+    base2, keys2, model2 = plugin._resolve_api_credentials("kkt")
+    assert keys2 == ["default-key"]
     assert model2 == "gemini-x"
 
 
@@ -316,12 +318,14 @@ def test_build_image_chain_with_quote():
     plugin.reply_with_quote = True
     event = FakeEvent([], "")
     event.message_obj = SimpleNamespace(message_id=42, raw_message=None)
-    chain = plugin._build_image_chain(event, "/tmp/a.jpg")
-    assert len(chain) == 2
+    chain = plugin._build_image_chain(event, "/tmp/a.jpg", elapsed_seconds=12)
+    assert len(chain) == 3
     assert isinstance(chain[0], Comp.Reply)
     assert chain[0].id == 42
-    assert isinstance(chain[1], Comp.Image)
-    assert chain[1].file == "/tmp/a.jpg"
+    assert isinstance(chain[1], Comp.Plain)
+    assert chain[1].text == "生成耗时：12秒，请查收喵"
+    assert isinstance(chain[2], Comp.Image)
+    assert chain[2].file == "/tmp/a.jpg"
 
 
 def test_build_image_chain_without_quote():
@@ -329,9 +333,50 @@ def test_build_image_chain_without_quote():
     plugin.reply_with_quote = False
     event = FakeEvent([], "")
     event.message_obj = SimpleNamespace(message_id=42, raw_message=None)
-    chain = plugin._build_image_chain(event, "/tmp/a.jpg")
-    assert len(chain) == 1
-    assert isinstance(chain[0], Comp.Image)
+    chain = plugin._build_image_chain(event, "/tmp/a.jpg", elapsed_seconds=3)
+    assert len(chain) == 2
+    assert isinstance(chain[0], Comp.Plain)
+    assert chain[0].text == "生成耗时：3秒，请查收喵"
+    assert isinstance(chain[1], Comp.Image)
+
+
+def test_build_help_text_is_concise():
+    from main import build_help_text
+
+    help_text = build_help_text()
+    assert "康康图" in help_text
+    assert "/kkt" in help_text
+    assert "image2" in help_text
+    assert "调整日限额" not in help_text
+    assert len(help_text.splitlines()) <= 8
+
+
+def test_format_image2_multi_ref_reject_includes_count_and_labels():
+    msg = Plugin._format_image2_multi_ref_reject(
+        [
+            {"label": "图1 · 引用原图/底图"},
+            {"label": "图2 · 当前消息图片"},
+            {"label": "图3 · @某人 的头像"},
+        ]
+    )
+    assert "Images edit模式" in msg
+    assert "已收到 3 张" in msg
+    assert "哈基米 /hajimi" in msg
+    assert "图1 · 引用原图/底图" in msg
+    assert "图2 · 当前消息图片" in msg
+    assert "图3 · @某人 的头像" in msg
+
+
+def test_should_use_images_api_modes():
+    plugin = object.__new__(Plugin)
+    plugin.image2_api_mode = "images"
+    assert plugin._should_use_images_api("image2", "wy-gpt-image-2") is True
+    assert plugin._should_use_images_api("kkt", "wy-gpt-image-2") is False
+    plugin.image2_api_mode = "chat"
+    assert plugin._should_use_images_api("image2", "wy-gpt-image-2") is False
+    plugin.image2_api_mode = "auto"
+    assert plugin._should_use_images_api("image2", "wy-gpt-image-2") is True
+    assert plugin._should_use_images_api("image2", "gemini-flash") is False
 
 
 class _UserEvent(FakeEvent):
@@ -389,7 +434,7 @@ def test_daily_quota_file_and_admin_bypass(tmp_path):
         assert await plugin._check_and_consume_daily_quota(e1) is None
         assert await plugin._check_and_consume_daily_quota(e2) is None
         msg = await plugin._check_and_consume_daily_quota(e3)
-        assert msg is not None and "配额" in msg
+        assert msg is not None and ("额度" in msg or "配额" in msg)
         assert await plugin._check_and_consume_daily_quota(admin) is None
 
     asyncio.run(run())
@@ -536,6 +581,8 @@ def test_format_quota_status_unlimited_and_limited():
     plugin._user_last_call = {}
     text = plugin._format_quota_status(None)
     assert "不限制" in text
+    assert "冷却：关闭" in text
+    assert "公用限额" not in text
 
     plugin.daily_quota = 50
     plugin.cooldown_seconds = 15
@@ -547,6 +594,8 @@ def test_format_quota_status_unlimited_and_limited():
     text2 = plugin._format_quota_status(None)
     assert "7/50" in text2
     assert "剩余 43" in text2
+    assert "冷却：15s" in text2
+    assert "管理员调限额" not in text2
 
 
 def test_cn_locale_style_parts_soft():
