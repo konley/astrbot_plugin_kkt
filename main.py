@@ -45,8 +45,8 @@ class KktImagePlugin(Star):
     _CHANNEL_IMAGE2 = "image2"
     _CHANNELS = (_CHANNEL_MAIN, _CHANNEL_IMAGE2)
     _CHANNEL_LABELS = {
-        "main": "hajimi",
-        "image2": "image2",
+        "main": "/hajimi",
+        "image2": "/image2",
     }
 
     # Sensitive-lexicon Vocabulary 文件名 → WebUI 可选类别名
@@ -960,93 +960,81 @@ class KktImagePlugin(Star):
     @staticmethod
     def _format_usd(amount: float) -> str:
         if amount <= 0:
-            return "-"
+            return "$0"
         if amount < 0.01:
             return f"${amount:.4f}"
-        # 去掉多余尾零：0.02 -> $0.02，1.00 -> $1
         text = f"{amount:.4f}".rstrip("0").rstrip(".")
         return f"${text}"
 
-    @staticmethod
-    def _pad(text: str, width: int) -> str:
-        """按显示宽度左对齐填充（CJK 计 2 宽）。"""
-        s = str(text)
-        w = 0
-        for ch in s:
-            w += 2 if ord(ch) > 0x7F else 1
-        return s + (" " * max(0, width - w))
-
-    def _format_quota_table_row(
-        self, unit_text: str, channel: str, daily_text: str, total_text: str, fee_text: str
-    ) -> str:
-        return (
-            f"{self._pad(unit_text, 8)}"
-            f"{self._pad(channel, 10)}"
-            f"{self._pad(daily_text, 12)}"
-            f"{self._pad(total_text, 8)}"
-            f"{fee_text}"
+    def _format_channel_usage_block(self, channel: str, usage: dict) -> str:
+        label = self._CHANNEL_LABELS.get(channel, channel)
+        bucket = usage["channels"].get(channel) or self._empty_channel_bucket()
+        daily = int(bucket.get("daily") or 0)
+        total = int(bucket.get("total") or 0)
+        limit = int(self.channel_limits.get(channel, 0))
+        unit = self._cost_usd_for_channel(channel)
+        cost_total = total * unit
+        cost_daily = daily * unit
+        if limit <= 0:
+            daily_part = f"今日 {daily}（不限制）"
+        else:
+            remain = max(0, limit - daily)
+            daily_part = f"今日 {daily}/{limit}（剩余 {remain}）"
+        line1 = f"【{label}】{daily_part} · 累计 {total} 次"
+        line2 = (
+            f"  单价 {self._format_usd(unit)}/次 · "
+            f"今日 {self._format_usd(cost_daily)} · "
+            f"累计 {self._format_usd(cost_total)}"
         )
+        return f"{line1}\n{line2}"
 
     def _format_quota_status(self, event: AstrMessageEvent | None = None) -> str:
-        """生成分通道限额/用量/费用表（单价为首列）。"""
+        """生成分通道限额/用量/费用文案。"""
         usage = self._load_usage_state()
-        header = self._format_quota_table_row("单价", "通道", "今日", "累计", "费用")
-        rows = [header]
-        daily_all = 0
-        total_all = 0
-        cost_all = 0.0
-        for ch in self._CHANNELS:
-            bucket = usage["channels"].get(ch) or self._empty_channel_bucket()
-            daily = int(bucket.get("daily") or 0)
-            total = int(bucket.get("total") or 0)
-            limit = int(self.channel_limits.get(ch, 0))
-            unit = self._cost_usd_for_channel(ch)
-            fee = total * unit
-            daily_all += daily
-            total_all += total
-            cost_all += fee
-            if limit <= 0:
-                daily_text = f"{daily}/∞"
-            else:
-                daily_text = f"{daily}/{limit}"
-            rows.append(
-                self._format_quota_table_row(
-                    self._format_usd(unit) if unit > 0 else "-",
-                    self._CHANNEL_LABELS.get(ch, ch),
-                    daily_text,
-                    str(total),
-                    self._format_usd(fee) if unit > 0 else "-",
-                )
-            )
-        rows.append(
-            self._format_quota_table_row(
-                "-",
-                "合计",
-                str(daily_all),
-                str(total_all),
-                self._format_usd(cost_all) if cost_all > 0 else "-",
-            )
+        lines = [
+            self._format_channel_usage_block(ch, usage) for ch in self._CHANNELS
+        ]
+        total_all = sum(
+            int((usage["channels"][ch].get("total") or 0)) for ch in self._CHANNELS
+        )
+        daily_all = sum(
+            int((usage["channels"][ch].get("daily") or 0)) for ch in self._CHANNELS
+        )
+        cost_all = sum(
+            int((usage["channels"][ch].get("total") or 0))
+            * self._cost_usd_for_channel(ch)
+            for ch in self._CHANNELS
+        )
+        cost_daily_all = sum(
+            int((usage["channels"][ch].get("daily") or 0))
+            * self._cost_usd_for_channel(ch)
+            for ch in self._CHANNELS
+        )
+        lines.append(
+            f"【合计】今日 {daily_all} 次 / 累计 {total_all} 次 · "
+            f"今日 {self._format_usd(cost_daily_all)} / "
+            f"累计 {self._format_usd(cost_all)}"
         )
 
         if self.cooldown_seconds <= 0:
-            cd_line = "冷却 关闭"
+            cd_line = "冷却：关闭"
         elif event is not None and self._is_admin(event):
-            cd_line = f"冷却 {self.cooldown_seconds}s（管理员免冷却）"
+            cd_line = f"冷却：{self.cooldown_seconds}s（管理员免冷却）"
         elif event is not None:
             sender_id = str(event.get_sender_id() or "").strip()
             last = self._user_last_call.get(sender_id) if sender_id else None
             if last is None:
-                cd_line = f"冷却 {self.cooldown_seconds}s"
+                cd_line = f"冷却：{self.cooldown_seconds}s"
             else:
                 remain_cd = self.cooldown_seconds - (time.monotonic() - last)
                 if remain_cd > 0:
-                    cd_line = f"冷却 还需 {int(remain_cd) + 1}s"
+                    cd_line = f"冷却：还需 {int(remain_cd) + 1}s"
                 else:
-                    cd_line = f"冷却 {self.cooldown_seconds}s"
+                    cd_line = f"冷却：{self.cooldown_seconds}s"
         else:
-            cd_line = f"冷却 {self.cooldown_seconds}s"
-        rows.append(cd_line)
-        return "\n".join(rows)
+            cd_line = f"冷却：{self.cooldown_seconds}s"
+        lines.append(cd_line)
+        return "\n".join(lines)
 
     async def _set_channel_quota_limit(
         self, channel: str, limit: int

@@ -525,7 +525,7 @@ def test_channel_usage_record_and_cost(tmp_path):
         await plugin._record_successful_usage("main")
         # main 日限 2 已满
         msg = await plugin._check_channel_quota(user, "main")
-        assert msg is not None and ("hajimi" in msg or "main" in msg)
+        assert msg is not None and ("hajimi" in msg or "/hajimi" in msg or "main" in msg)
         # image2 日限 1 已满
         msg2 = await plugin._check_channel_quota(user, "image2")
         assert msg2 is not None and "image2" in msg2
@@ -535,11 +535,11 @@ def test_channel_usage_record_and_cost(tmp_path):
 
     asyncio.run(run())
     text = plugin._format_quota_status(None)
-    assert "1350" not in text  # sanity
     assert "2" in text and "1" in text
     assert "$0.04" in text or "0.04" in text  # main 2 * 0.02
     assert "$0.08" in text or "0.08" in text  # image2 1 * 0.08
-    assert "单价" in text and "hajimi" in text
+    assert "单价" in text and "/hajimi" in text
+    assert "约" not in text
     assert "预估" not in text and "上游账单" not in text
     data = json.loads(plugin.usage_path.read_text(encoding="utf-8"))
     assert data["channels"]["main"]["total"] == 2
@@ -703,8 +703,8 @@ def test_format_quota_status_unlimited_and_limited(tmp_path):
     plugin.cost_image2_usd = 0.0
     plugin._user_last_call = {}
     text = plugin._format_quota_status(None)
-    assert "/∞" in text or "不限制" in text
-    assert "冷却 关闭" in text
+    assert "不限制" in text
+    assert "冷却：关闭" in text
     assert "公用限额" not in text
     assert "上游账单" not in text
 
@@ -726,10 +726,12 @@ def test_format_quota_status_unlimited_and_limited(tmp_path):
     plugin._load_usage_state = fake_usage  # type: ignore[method-assign]
     text2 = plugin._format_quota_status(None)
     assert "7/50" in text2
-    assert "100" in text2
-    assert "冷却 15s" in text2
-    assert "hajimi" in text2
+    assert "剩余 43" in text2
+    assert "累计 100" in text2
+    assert "冷却：15s" in text2
+    assert "/hajimi" in text2
     assert "单价" in text2
+    assert "约" not in text2
     assert "预估" not in text2
     assert "上游账单" not in text2
 
