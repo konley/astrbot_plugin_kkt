@@ -1,6 +1,6 @@
 name: astrbot_plugin_kkt
-desc: 康康图：通过 OpenAI 兼容接口生成和编辑图片，支持多图、引用图文、可配置唤醒词、别名与群黑名单
-version: 0.6.6
+desc: 康康图：OpenAI 兼容生图/修图，分通道额度与预估费用，多图/引用/群黑名单
+version: 0.7.0
 author: konley
 display_name: 康康图
 repo: https://github.com/konley/astrbot_plugin_kkt

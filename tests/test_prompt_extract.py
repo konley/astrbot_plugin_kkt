@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import types
@@ -483,6 +484,7 @@ def test_daily_quota_file_and_admin_bypass(tmp_path):
     plugin = object.__new__(Plugin)
     plugin.daily_quota = 2
     plugin.quota_path = tmp_path / "daily_quota.json"
+    plugin.usage_path = None
     plugin._quota_lock = asyncio.Lock()
 
     async def run():
@@ -497,6 +499,64 @@ def test_daily_quota_file_and_admin_bypass(tmp_path):
         assert await plugin._check_and_consume_daily_quota(admin) is None
 
     asyncio.run(run())
+
+
+def test_channel_usage_record_and_cost(tmp_path):
+    import asyncio
+
+    plugin = object.__new__(Plugin)
+    plugin.usage_path = tmp_path / "usage.json"
+    plugin.quota_path = tmp_path / "daily_quota.json"
+    plugin.channel_limit_override_path = tmp_path / "channel_quota_limit.json"
+    plugin.quota_limit_override_path = tmp_path / "daily_quota_limit.json"
+    plugin._quota_lock = asyncio.Lock()
+    plugin.channel_limits = {"main": 2, "image2": 1}
+    plugin.daily_quota = 2
+    plugin.cost_main_usd = 0.02
+    plugin.cost_image2_usd = 0.08
+    plugin.cooldown_seconds = 0
+    plugin._user_last_call = {}
+
+    async def run():
+        user = _UserEvent("u1")
+        assert await plugin._check_channel_quota(user, "main") is None
+        await plugin._record_successful_usage("main")
+        await plugin._record_successful_usage("image2")
+        await plugin._record_successful_usage("main")
+        # main 日限 2 已满
+        msg = await plugin._check_channel_quota(user, "main")
+        assert msg is not None and ("hajimi" in msg or "main" in msg)
+        # image2 日限 1 已满
+        msg2 = await plugin._check_channel_quota(user, "image2")
+        assert msg2 is not None and "image2" in msg2
+        # 管理员可继续
+        admin = _UserEvent("a1", admin=True)
+        assert await plugin._check_channel_quota(admin, "main") is None
+
+    asyncio.run(run())
+    text = plugin._format_quota_status(None)
+    assert "1350" not in text  # sanity
+    assert "2" in text and "1" in text
+    assert "$0.04" in text or "0.04" in text  # main 2 * 0.02
+    assert "$0.08" in text or "0.08" in text  # image2 1 * 0.08
+    assert "单价" in text and "hajimi" in text
+    assert "预估" not in text and "上游账单" not in text
+    data = json.loads(plugin.usage_path.read_text(encoding="utf-8"))
+    assert data["channels"]["main"]["total"] == 2
+    assert data["channels"]["image2"]["total"] == 1
+
+
+def test_parse_quota_command_arg_channels():
+    plugin = object.__new__(Plugin)
+    assert plugin._parse_quota_command_arg("") == (None, None, True)
+    assert plugin._parse_quota_command_arg("main") == ("main", None, True)
+    assert plugin._parse_quota_command_arg("image2") == ("image2", None, True)
+    assert plugin._parse_quota_command_arg("10") == ("all", 10, True)
+    assert plugin._parse_quota_command_arg("main 100") == ("main", 100, True)
+    assert plugin._parse_quota_command_arg("image2=20")[0:2] == ("image2", 20)
+    assert plugin._channel_for_command("kkt") == "main"
+    assert plugin._channel_for_command("hajimi") == "main"
+    assert plugin._channel_for_command("image2") == "image2"
 
 
 def test_image_label_roles():
@@ -632,29 +692,46 @@ def test_compose_user_instruction_chinese_style():
     assert text2.startswith("用户指令") or "画一只猫" in text2
 
 
-def test_format_quota_status_unlimited_and_limited():
+def test_format_quota_status_unlimited_and_limited(tmp_path):
     plugin = object.__new__(Plugin)
-    plugin.daily_quota = 0
     plugin.cooldown_seconds = 0
-    plugin.quota_path = Path(".") / "no_quota.json"
+    plugin.usage_path = tmp_path / "usage.json"
+    plugin.quota_path = tmp_path / "daily_quota.json"
+    plugin.channel_limits = {"main": 0, "image2": 0}
+    plugin.daily_quota = 0
+    plugin.cost_main_usd = 0.0
+    plugin.cost_image2_usd = 0.0
     plugin._user_last_call = {}
     text = plugin._format_quota_status(None)
-    assert "不限制" in text
-    assert "冷却：关闭" in text
+    assert "/∞" in text or "不限制" in text
+    assert "冷却 关闭" in text
     assert "公用限额" not in text
+    assert "上游账单" not in text
 
+    plugin.channel_limits = {"main": 50, "image2": 10}
     plugin.daily_quota = 50
     plugin.cooldown_seconds = 15
+    plugin.cost_main_usd = 0.01
+    plugin.cost_image2_usd = 0.05
 
-    def fake_load():
-        return {"date": "2026-07-22", "count": 7}
+    def fake_usage():
+        return {
+            "date": "2026-07-22",
+            "channels": {
+                "main": {"daily": 7, "total": 100},
+                "image2": {"daily": 1, "total": 5},
+            },
+        }
 
-    plugin._load_quota_state = fake_load  # type: ignore[method-assign]
+    plugin._load_usage_state = fake_usage  # type: ignore[method-assign]
     text2 = plugin._format_quota_status(None)
     assert "7/50" in text2
-    assert "剩余 43" in text2
-    assert "冷却：15s" in text2
-    assert "管理员调限额" not in text2
+    assert "100" in text2
+    assert "冷却 15s" in text2
+    assert "hajimi" in text2
+    assert "单价" in text2
+    assert "预估" not in text2
+    assert "上游账单" not in text2
 
 
 def test_cn_locale_style_parts_soft():

@@ -97,20 +97,37 @@ NEW_API_KEY
 4. 模型明确用文字拒答时不再切换 Key（避免无意义消耗）。
 5. 所有 Key 都失败后，把最后一次错误返回给用户。
 
-### 日配额（三通道共用）
+### 分通道日配额与预估费用（仅管理员）
 
-`/hajimi`、`/kkt`、`/image2` 共用同一套「今日总次数」：
+计费桶：
+
+- `main`：`/kkt` + `/hajimi` 共用
+- `image2`：仅 `/image2`
+
+成功出图后才记 1 次（失败不扣）。持久化 `data/plugin_data/kkt/usage.json`（含今日 `daily` 与累计 `total`）。
+
+WebUI 可配置：
 
 ```text
-/kkt额度              # 查询
-/kkt额度 10           # 管理员：上限改为 10，已用次数不变
-/hajimi额度 10        # 同上
-/image2额度 10        # 同上
-/kkt额度 0            # 管理员：关闭日限额
-/kkt重置额度          # 管理员：清零今日已用（上限不变）
+daily_quota_main / daily_quota_image2   # 各通道日上限，0=不限制
+cost_main_usd / cost_image2_usd         # 预估 USD/次（仅展示）
 ```
 
-指令调整的限额会写入 `data/plugin_data/kkt/daily_quota_limit.json`，重载后仍生效；不会改动 WebUI 里的 `daily_quota` 默认配置项。
+指令（**仅管理员**）：
+
+```text
+/kkt额度                     # 查询：分通道今日/累计次数 + 预估费用
+/kkt额度 10                  # 两通道日上限都改为 10
+/kkt额度 main 100            # 只改 main
+/kkt额度 image2 20           # 只改 image2
+/kkt额度 0                   # 两通道关闭日限额
+/kkt重置额度                 # 清零全部通道今日已用（累计 total 保留）
+/kkt重置额度 main            # 只清 main 今日
+/kkt统计                     # 同 /kkt额度 查询
+```
+
+费用 = 当前配置单价 × 次数（预估，非上游账单；改单价后展示按新价重算）。  
+运行时限额写入 `channel_quota_limit.json`；不会改 WebUI 配置文件。
 
 ## 指令格式
 

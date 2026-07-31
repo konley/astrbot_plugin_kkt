@@ -158,10 +158,34 @@
     "hint": "同一用户两次生图的最小间隔，仅对该用户生效；0=关闭。管理员不受 CD 限制"
   },
   "daily_quota": {
-    "description": "单日总配额",
+    "description": "单日总配额(兼容旧项)",
     "type": "int",
     "default": 50,
-    "hint": "全服每天最多生图次数（/kkt /hajimi /image2 共用）；0=不限制。超出后普通用户不可用，仅管理员可继续。也可用指令 /kkt额度 10 运行时调整（已用不变）"
+    "hint": "兼容旧配置：当 daily_quota_main / daily_quota_image2 未单独填写时，作为两通道默认日上限。0=不限制。优先用下方分通道项"
+  },
+  "daily_quota_main": {
+    "description": "main通道日限额(/kkt|/hajimi)",
+    "type": "int",
+    "default": 50,
+    "hint": "/kkt 与 /hajimi 共用；0=不限制。超出后普通用户不可用，管理员可继续。也可用 /kkt额度 main 100 运行时调整"
+  },
+  "daily_quota_image2": {
+    "description": "image2通道日限额",
+    "type": "int",
+    "default": 50,
+    "hint": "仅 /image2；0=不限制。也可用 /kkt额度 image2 20 运行时调整"
+  },
+  "cost_main_usd": {
+    "description": "main预估单价(USD/次)",
+    "type": "float",
+    "default": 0,
+    "hint": "/kkt|/hajimi 每次成功出图的预估费用，仅管理员查询展示（次数×单价），非上游真实账单。0=不显示金额含义"
+  },
+  "cost_image2_usd": {
+    "description": "image2预估单价(USD/次)",
+    "type": "float",
+    "default": 0,
+    "hint": "/image2 每次成功出图的预估费用，仅管理员查询展示。改价后按「当前单价×累计次数」重算展示"
   },
   "cleanup_delay": {
     "description": "临时文件清理延迟秒数",

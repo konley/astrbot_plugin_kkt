@@ -27,7 +27,7 @@ def build_help_text() -> str:
         "康康图\n"
         "用法：/kkt|/hajimi|/image2 <提示词>\n"
         "回复图可编辑；image2 仅 1 张参考图\n"
-        "额度：/kkt额度；审核开关：/kkt审核"
+        "额度：/kkt额度（管理员）；审核：/kkt审核"
     )
 
 
@@ -35,10 +35,19 @@ def build_help_text() -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生成或编辑图片",
-    "0.6.6",
+    "0.7.0",
 )
 class KktImagePlugin(Star):
     """Generate or edit images through an OpenAI-compatible endpoint."""
+
+    # 计费/限额通道：kkt+hajimi 共用 main；image2 独立
+    _CHANNEL_MAIN = "main"
+    _CHANNEL_IMAGE2 = "image2"
+    _CHANNELS = (_CHANNEL_MAIN, _CHANNEL_IMAGE2)
+    _CHANNEL_LABELS = {
+        "main": "hajimi",
+        "image2": "image2",
+    }
 
     # Sensitive-lexicon Vocabulary 文件名 → WebUI 可选类别名
     _LEXICON_FILE_TO_CATEGORY: dict[str, str] = {
@@ -157,14 +166,30 @@ class KktImagePlugin(Star):
         self.style_prompt = "\n".join(style_parts).strip()
         # 防刷：每用户独立 CD（秒）；0=关闭；管理员不受限
         self.cooldown_seconds = max(0, int(config.get("cooldown_seconds", 15)))
-        # 单日全服总调用次数上限；0=不限制；超出后仅管理员可继续
-        # 配置默认值；运行时可由管理员指令覆盖并写入 runtime 覆盖文件
-        self._daily_quota_config_default = max(0, int(config.get("daily_quota", 50)))
+        # 分通道日限额配置默认；运行时可由管理员指令覆盖
+        # daily_quota 兼容旧配置，作为 main 默认；image2 可用独立项
+        legacy_quota = max(0, int(config.get("daily_quota", 50)))
+        main_cfg = config.get("daily_quota_main", None)
+        image2_cfg = config.get("daily_quota_image2", None)
+        self._daily_quota_config_defaults: dict[str, int] = {
+            self._CHANNEL_MAIN: (
+                max(0, int(main_cfg)) if main_cfg is not None else legacy_quota
+            ),
+            self._CHANNEL_IMAGE2: (
+                max(0, int(image2_cfg)) if image2_cfg is not None else legacy_quota
+            ),
+        }
+        # 预估单价 USD/次（仅展示，非上游真实账单）
+        self.cost_main_usd = max(0.0, float(config.get("cost_main_usd", 0) or 0))
+        self.cost_image2_usd = max(0.0, float(config.get("cost_image2_usd", 0) or 0))
         self.cleanup_delay = max(5, int(config.get("cleanup_delay", 15)))
         self.temp_dir = Path(get_astrbot_data_path()) / "plugin_data" / "kkt"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        # 旧单桶文件；迁移后仍可读
         self.quota_path = self.temp_dir / "daily_quota.json"
         self.quota_limit_override_path = self.temp_dir / "daily_quota_limit.json"
+        self.usage_path = self.temp_dir / "usage.json"
+        self.channel_limit_override_path = self.temp_dir / "channel_quota_limit.json"
         # 本地 Sensitive-lexicon 前置审核（默认关；词库不随插件分发）
         # WebUI 为默认值；管理员指令可 runtime 覆盖并持久化
         self._sensitive_filter_config_default = bool(
@@ -185,7 +210,9 @@ class KktImagePlugin(Star):
         # 内存：sender_id -> 上次成功触发生图的 monotonic 时间
         self._user_last_call: dict[str, float] = {}
         self._quota_lock = asyncio.Lock()
-        self.daily_quota = self._load_daily_quota_limit()
+        self.channel_limits = self._load_channel_limits()
+        # 兼容旧代码/测试：daily_quota ≈ main 通道日限
+        self.daily_quota = self.channel_limits[self._CHANNEL_MAIN]
         self._help_text = build_help_text()
         # category -> sorted words (long first)；开启时加载
         self._sensitive_words_by_cat: dict[str, list[str]] = {}
@@ -198,7 +225,9 @@ class KktImagePlugin(Star):
             "model=%s image2_model=%s image2_key=%s main_keys=%d image2_keys=%d "
             "endpoint=%s image2_mode=%s image2_size=%s "
             "reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
-            "cooldown=%ds daily_quota=%d enable_at_avatar=%s label_images=%s "
+            "cooldown=%ds quota_main=%d quota_image2=%d "
+            "cost_main=$%.4f cost_image2=$%.4f "
+            "enable_at_avatar=%s label_images=%s "
             "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d "
             "sensitive_filter=%s sensitive_words=%d sensitive_cats=%s lexicon=%s",
             len(self.group_blacklist),
@@ -218,7 +247,10 @@ class KktImagePlugin(Star):
             self.reaction_emoji_enabled,
             len(self.reaction_emoji_list),
             self.cooldown_seconds,
-            self.daily_quota,
+            self.channel_limits[self._CHANNEL_MAIN],
+            self.channel_limits[self._CHANNEL_IMAGE2],
+            self.cost_main_usd,
+            self.cost_image2_usd,
             self.enable_at_avatar,
             self.label_images,
             self.prefer_chinese_text,
@@ -644,78 +676,227 @@ class KktImagePlugin(Star):
         if sender_id:
             self._user_last_call[sender_id] = time.monotonic()
 
-    def _load_quota_state(self) -> dict:
-        today = date.today().isoformat()
-        default = {"date": today, "count": 0}
-        try:
-            if not self.quota_path.exists():
-                return default
-            data = json.loads(self.quota_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                return default
-            if str(data.get("date") or "") != today:
-                return default
-            count = int(data.get("count") or 0)
-            return {"date": today, "count": max(0, count)}
-        except Exception as exc:
-            logger.warning("[kkt] 读取日配额失败: %s", exc)
-            return default
+    @classmethod
+    def _channel_for_command(cls, command: str) -> str:
+        """指令名 → 计费通道。"""
+        if str(command or "").strip().lower() == cls._CHANNEL_IMAGE2:
+            return cls._CHANNEL_IMAGE2
+        return cls._CHANNEL_MAIN
 
-    def _save_quota_state(self, state: dict) -> None:
+    def _cost_usd_for_channel(self, channel: str) -> float:
+        if channel == self._CHANNEL_IMAGE2:
+            return float(self.cost_image2_usd)
+        return float(self.cost_main_usd)
+
+    @staticmethod
+    def _empty_channel_bucket() -> dict:
+        return {"daily": 0, "total": 0}
+
+    def _empty_usage_state(self) -> dict:
+        today = date.today().isoformat()
+        return {
+            "date": today,
+            "channels": {
+                ch: self._empty_channel_bucket() for ch in self._CHANNELS
+            },
+        }
+
+    def _normalize_usage_state(self, data: dict | None) -> dict:
+        """规范化 usage；跨日则 daily 归零、total 保留。"""
+        today = date.today().isoformat()
+        state = self._empty_usage_state()
+        if not isinstance(data, dict):
+            return state
+        channels_in = data.get("channels")
+        if not isinstance(channels_in, dict):
+            channels_in = {}
+        same_day = str(data.get("date") or "") == today
+        for ch in self._CHANNELS:
+            raw = channels_in.get(ch)
+            if not isinstance(raw, dict):
+                raw = {}
+            total = max(0, int(raw.get("total") or 0))
+            daily = max(0, int(raw.get("daily") or 0)) if same_day else 0
+            state["channels"][ch] = {"daily": daily, "total": total}
+        # 兼容旧单桶：{"date","count"} 无 channels
+        if "channels" not in data and "count" in data:
+            legacy = max(0, int(data.get("count") or 0))
+            if same_day or str(data.get("date") or "") == today:
+                state["channels"][self._CHANNEL_MAIN]["daily"] = legacy
+            # 旧 count 无法可靠推断 total；仅迁移当日 daily
+        state["date"] = today
+        return state
+
+    def _load_usage_state(self) -> dict:
+        """读取分通道用量（含旧 daily_quota.json 迁移）。"""
         try:
-            self.quota_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.usage_path.exists():
+                data = json.loads(self.usage_path.read_text(encoding="utf-8"))
+                return self._normalize_usage_state(
+                    data if isinstance(data, dict) else None
+                )
+            # 迁移旧单桶
+            if self.quota_path.exists():
+                legacy = json.loads(self.quota_path.read_text(encoding="utf-8"))
+                state = self._normalize_usage_state(
+                    legacy if isinstance(legacy, dict) else None
+                )
+                self._save_usage_state(state)
+                logger.info(
+                    "[kkt] 已从 daily_quota.json 迁移用量到 usage.json: %s",
+                    state,
+                )
+                return state
+        except Exception as exc:
+            logger.warning("[kkt] 读取用量失败: %s", exc)
+        return self._empty_usage_state()
+
+    def _save_usage_state(self, state: dict) -> None:
+        try:
+            normalized = self._normalize_usage_state(state)
+            self.usage_path.parent.mkdir(parents=True, exist_ok=True)
+            self.usage_path.write_text(
+                json.dumps(normalized, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            # 同步写旧文件，便于回滚/外部脚本
+            main_daily = int(
+                normalized["channels"][self._CHANNEL_MAIN].get("daily") or 0
+            )
             self.quota_path.write_text(
-                json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(
+                    {
+                        "date": normalized["date"],
+                        "count": main_daily,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 encoding="utf-8",
             )
         except Exception as exc:
-            logger.warning("[kkt] 写入日配额失败: %s", exc)
+            logger.warning("[kkt] 写入用量失败: %s", exc)
 
-    def _load_daily_quota_limit(self) -> int:
-        """读取运行时日限额；无覆盖文件则用插件配置默认值。"""
+    # 兼容旧测试/调用
+    def _load_quota_state(self) -> dict:
+        usage = self._load_usage_state()
+        main = usage["channels"][self._CHANNEL_MAIN]
+        return {
+            "date": usage["date"],
+            "count": int(main.get("daily") or 0),
+        }
+
+    def _save_quota_state(self, state: dict) -> None:
+        usage = self._load_usage_state()
+        count = max(0, int(state.get("count") or 0))
+        usage["channels"][self._CHANNEL_MAIN]["daily"] = count
+        usage["date"] = date.today().isoformat()
+        self._save_usage_state(usage)
+
+    def _load_channel_limits(self) -> dict[str, int]:
+        """读取各通道日限额；优先 channel 覆盖 → 旧单桶覆盖 → 配置默认。"""
+        limits = {
+            ch: int(self._daily_quota_config_defaults.get(ch, 0))
+            for ch in self._CHANNELS
+        }
         try:
-            path = self.quota_limit_override_path
-            if not path.exists():
-                return self._daily_quota_config_default
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or "limit" not in data:
-                return self._daily_quota_config_default
-            return max(0, int(data.get("limit")))
+            path = self.channel_limit_override_path
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    raw_limits = data.get("limits")
+                    if isinstance(raw_limits, dict):
+                        for ch in self._CHANNELS:
+                            if ch in raw_limits:
+                                limits[ch] = max(0, int(raw_limits[ch]))
+                    return limits
+            # 旧单桶覆盖 → 两通道同值（兼容）
+            if self.quota_limit_override_path.exists():
+                data = json.loads(
+                    self.quota_limit_override_path.read_text(encoding="utf-8")
+                )
+                if isinstance(data, dict) and "limit" in data:
+                    legacy = max(0, int(data.get("limit")))
+                    for ch in self._CHANNELS:
+                        limits[ch] = legacy
         except Exception as exc:
-            logger.warning("[kkt] 读取日限额覆盖失败，回退配置默认: %s", exc)
-            return self._daily_quota_config_default
+            logger.warning("[kkt] 读取通道限额失败，回退配置默认: %s", exc)
+        return limits
 
-    def _save_daily_quota_limit(self, limit: int) -> None:
-        """持久化运行时日限额（不改 WebUI 配置文件，不重置已用次数）。"""
-        limit = max(0, int(limit))
+    def _save_channel_limits(self, limits: dict[str, int]) -> None:
         payload = {
-            "limit": limit,
+            "limits": {
+                ch: max(0, int(limits.get(ch, 0))) for ch in self._CHANNELS
+            },
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "source": "command",
         }
-        self.quota_limit_override_path.parent.mkdir(parents=True, exist_ok=True)
-        self.quota_limit_override_path.write_text(
+        self.channel_limit_override_path.parent.mkdir(parents=True, exist_ok=True)
+        self.channel_limit_override_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        self.daily_quota = limit
-        logger.info("[kkt] 日限额已更新: limit=%d", limit)
+        self.channel_limits = {
+            ch: max(0, int(limits.get(ch, 0))) for ch in self._CHANNELS
+        }
+        self.daily_quota = self.channel_limits[self._CHANNEL_MAIN]
+        # 同步旧单桶覆盖文件（main）
+        try:
+            self.quota_limit_override_path.write_text(
+                json.dumps(
+                    {
+                        "limit": self.channel_limits[self._CHANNEL_MAIN],
+                        "updated_at": payload["updated_at"],
+                        "source": "command",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("[kkt] 同步旧限额文件失败: %s", exc)
+        logger.info("[kkt] 通道日限额已更新: %s", self.channel_limits)
+
+    def _load_daily_quota_limit(self) -> int:
+        """兼容：返回 main 通道日限额。"""
+        return int(self._load_channel_limits().get(self._CHANNEL_MAIN, 0))
+
+    def _save_daily_quota_limit(self, limit: int) -> None:
+        """兼容：两通道设为同一上限。"""
+        limit = max(0, int(limit))
+        self._save_channel_limits(
+            {self._CHANNEL_MAIN: limit, self._CHANNEL_IMAGE2: limit}
+        )
+
+    @classmethod
+    def _parse_channel_token(cls, text: str) -> str | None:
+        """解析通道名；无法识别返回 None。"""
+        raw = (text or "").strip().lower()
+        if not raw:
+            return None
+        if raw in {"main", "kkt", "hajimi", "默认", "主通道"}:
+            return cls._CHANNEL_MAIN
+        if raw in {"image2", "img2", "image", "图2"}:
+            return cls._CHANNEL_IMAGE2
+        if raw in {"all", "全部", "所有"}:
+            return "all"
+        return None
 
     @staticmethod
     def _parse_quota_limit_arg(text: str) -> int | None:
-        """解析额度指令参数。
+        """解析额度指令中的数字上限。
 
         支持：
         - 空 / 无数字 -> None（表示查询）
-        - "10" / "额度 10" / "限额10" / "set 10" / "to10"
-        返回非负整数；解析失败返回 None（调用方再判断是否非法）。
+        - "10" / "额度 10" / "main 10" / "image2=20"
         """
         raw = (text or "").strip()
         if not raw:
             return None
-        # 去掉常见前缀词，只留数字
         cleaned = re.sub(
-            r"(?i)^\s*(?:额度|限额|配额|quota|limit|set|to|为|到|=|:|：)+",
+            r"(?i)^\s*(?:额度|限额|配额|quota|limit|set|to|为|到|=|:|：|"
+            r"main|kkt|hajimi|image2|img2|image|默认|主通道|图2|全部|所有|all)+",
             "",
             raw,
         ).strip()
@@ -724,101 +905,317 @@ class KktImagePlugin(Star):
             return None
         if re.fullmatch(r"\d+", cleaned):
             return int(cleaned)
-        # 兜底：整段里抓第一个整数
         match = re.search(r"(\d+)", raw)
         if match and re.fullmatch(r"[\D]*\d+[\D]*", raw.replace(" ", "")):
-            # 避免把「查看10次记录」这类误当 set；仅当文本基本是“词+数字”
             return int(match.group(1))
         return None
 
+    def _parse_quota_command_arg(
+        self, text: str
+    ) -> tuple[str | None, int | None, bool]:
+        """解析额度参数 → (channel|None|all, limit|None, ok)。
+
+        - 空：查询全部
+        - main / image2：查询该通道
+        - 10：两通道同设 10
+        - main 10 / image2=20：设单通道
+        ok=False 表示参数非法。
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return None, None, True
+        parts = raw.split()
+        # 单 token
+        if len(parts) == 1:
+            token = parts[0]
+            ch = self._parse_channel_token(token)
+            if ch is not None:
+                return ch, None, True
+            # image2=10 / main:20
+            m = re.fullmatch(
+                r"(?i)(main|kkt|hajimi|image2|img2|image|默认|主通道|图2)"
+                r"\s*(?:=|：|:)?\s*(\d+)",
+                token,
+            )
+            if m:
+                return self._parse_channel_token(m.group(1)), int(m.group(2)), True
+            limit = self._parse_quota_limit_arg(token)
+            if limit is not None:
+                return "all", limit, True
+            return None, None, False
+        # 多 token：通道 + 数字，或 词 + 数字
+        ch = self._parse_channel_token(parts[0])
+        rest = " ".join(parts[1:])
+        limit = self._parse_quota_limit_arg(rest)
+        if ch is not None and limit is not None:
+            return ch, limit, True
+        if ch is not None and not rest.strip():
+            return ch, None, True
+        # 无通道前缀：整段当数字
+        limit2 = self._parse_quota_limit_arg(raw)
+        if limit2 is not None:
+            return "all", limit2, True
+        return None, None, False
+
+    @staticmethod
+    def _format_usd(amount: float) -> str:
+        if amount <= 0:
+            return "-"
+        if amount < 0.01:
+            return f"${amount:.4f}"
+        # 去掉多余尾零：0.02 -> $0.02，1.00 -> $1
+        text = f"{amount:.4f}".rstrip("0").rstrip(".")
+        return f"${text}"
+
+    @staticmethod
+    def _pad(text: str, width: int) -> str:
+        """按显示宽度左对齐填充（CJK 计 2 宽）。"""
+        s = str(text)
+        w = 0
+        for ch in s:
+            w += 2 if ord(ch) > 0x7F else 1
+        return s + (" " * max(0, width - w))
+
+    def _format_quota_table_row(
+        self, unit_text: str, channel: str, daily_text: str, total_text: str, fee_text: str
+    ) -> str:
+        return (
+            f"{self._pad(unit_text, 8)}"
+            f"{self._pad(channel, 10)}"
+            f"{self._pad(daily_text, 12)}"
+            f"{self._pad(total_text, 8)}"
+            f"{fee_text}"
+        )
+
     def _format_quota_status(self, event: AstrMessageEvent | None = None) -> str:
-        """生成限额状态文案（含日配额与当前用户 CD）。"""
-        if self.daily_quota <= 0:
-            used = int(self._load_quota_state().get("count") or 0)
-            daily_line = "今日额度：不限制"
-            if used:
-                daily_line += f"（已用 {used}）"
-        else:
-            state = self._load_quota_state()
-            used = int(state.get("count") or 0)
-            remain = max(0, self.daily_quota - used)
-            daily_line = f"今日额度：{used}/{self.daily_quota}（剩余 {remain}）"
+        """生成分通道限额/用量/费用表（单价为首列）。"""
+        usage = self._load_usage_state()
+        header = self._format_quota_table_row("单价", "通道", "今日", "累计", "费用")
+        rows = [header]
+        daily_all = 0
+        total_all = 0
+        cost_all = 0.0
+        for ch in self._CHANNELS:
+            bucket = usage["channels"].get(ch) or self._empty_channel_bucket()
+            daily = int(bucket.get("daily") or 0)
+            total = int(bucket.get("total") or 0)
+            limit = int(self.channel_limits.get(ch, 0))
+            unit = self._cost_usd_for_channel(ch)
+            fee = total * unit
+            daily_all += daily
+            total_all += total
+            cost_all += fee
+            if limit <= 0:
+                daily_text = f"{daily}/∞"
+            else:
+                daily_text = f"{daily}/{limit}"
+            rows.append(
+                self._format_quota_table_row(
+                    self._format_usd(unit) if unit > 0 else "-",
+                    self._CHANNEL_LABELS.get(ch, ch),
+                    daily_text,
+                    str(total),
+                    self._format_usd(fee) if unit > 0 else "-",
+                )
+            )
+        rows.append(
+            self._format_quota_table_row(
+                "-",
+                "合计",
+                str(daily_all),
+                str(total_all),
+                self._format_usd(cost_all) if cost_all > 0 else "-",
+            )
+        )
 
         if self.cooldown_seconds <= 0:
-            cd_line = "冷却：关闭"
+            cd_line = "冷却 关闭"
         elif event is not None and self._is_admin(event):
-            cd_line = f"冷却：{self.cooldown_seconds}s（管理员免冷却）"
+            cd_line = f"冷却 {self.cooldown_seconds}s（管理员免冷却）"
         elif event is not None:
             sender_id = str(event.get_sender_id() or "").strip()
             last = self._user_last_call.get(sender_id) if sender_id else None
             if last is None:
-                cd_line = f"冷却：{self.cooldown_seconds}s"
+                cd_line = f"冷却 {self.cooldown_seconds}s"
             else:
                 remain_cd = self.cooldown_seconds - (time.monotonic() - last)
                 if remain_cd > 0:
-                    cd_line = f"冷却：还需 {int(remain_cd) + 1}s"
+                    cd_line = f"冷却 还需 {int(remain_cd) + 1}s"
                 else:
-                    cd_line = f"冷却：{self.cooldown_seconds}s"
+                    cd_line = f"冷却 {self.cooldown_seconds}s"
         else:
-            cd_line = f"冷却：{self.cooldown_seconds}s"
+            cd_line = f"冷却 {self.cooldown_seconds}s"
+        rows.append(cd_line)
+        return "\n".join(rows)
 
-        return f"{daily_line}\n{cd_line}"
-
-    async def _set_daily_quota_limit(self, limit: int) -> dict:
-        """设置日限额上限；不修改已用 count。"""
+    async def _set_channel_quota_limit(
+        self, channel: str, limit: int
+    ) -> dict:
+        """设置单通道或全部通道日限额；不改已用。"""
+        limit = max(0, int(limit))
         async with self._quota_lock:
-            self._save_daily_quota_limit(limit)
-            state = self._load_quota_state()
+            new_limits = dict(self.channel_limits)
+            if channel == "all":
+                for ch in self._CHANNELS:
+                    new_limits[ch] = limit
+            else:
+                ch = channel if channel in self._CHANNELS else self._CHANNEL_MAIN
+                new_limits[ch] = limit
+            self._save_channel_limits(new_limits)
+            usage = self._load_usage_state()
             return {
-                "limit": self.daily_quota,
-                "used": int(state.get("count") or 0),
-                "date": state.get("date") or date.today().isoformat(),
+                "limits": dict(self.channel_limits),
+                "usage": usage,
             }
 
-    async def _reset_daily_quota(self) -> dict:
-        """将今日已用次数清零。返回新状态。"""
+    async def _set_daily_quota_limit(self, limit: int) -> dict:
+        """兼容：两通道同设。"""
+        result = await self._set_channel_quota_limit("all", limit)
+        usage = result["usage"]
+        main_daily = int(
+            usage["channels"][self._CHANNEL_MAIN].get("daily") or 0
+        )
+        return {
+            "limit": self.channel_limits[self._CHANNEL_MAIN],
+            "used": main_daily,
+            "date": usage.get("date") or date.today().isoformat(),
+        }
+
+    async def _reset_channel_quota(self, channel: str = "all") -> dict:
+        """清零今日 daily（total 保留）。channel=all|main|image2。"""
         async with self._quota_lock:
-            state = {"date": date.today().isoformat(), "count": 0}
-            self._save_quota_state(state)
-            logger.info("[kkt] 日配额已重置: %s", state)
-            return state
+            usage = self._load_usage_state()
+            targets = (
+                list(self._CHANNELS)
+                if channel == "all"
+                else [channel if channel in self._CHANNELS else self._CHANNEL_MAIN]
+            )
+            for ch in targets:
+                usage["channels"][ch]["daily"] = 0
+            usage["date"] = date.today().isoformat()
+            self._save_usage_state(usage)
+            logger.info("[kkt] 日配额已重置: channel=%s state=%s", channel, usage)
+            return usage
+
+    async def _reset_daily_quota(self) -> dict:
+        """兼容：清零全部通道今日已用。"""
+        usage = await self._reset_channel_quota("all")
+        return {
+            "date": usage["date"],
+            "count": 0,
+        }
+
+    async def _check_channel_quota(
+        self, event: AstrMessageEvent, channel: str
+    ) -> str | None:
+        """仅检查通道日限额，不扣次。超限非管理员返回提示。"""
+        limit = int(self.channel_limits.get(channel, 0))
+        if limit <= 0:
+            return None
+        async with self._quota_lock:
+            usage = self._load_usage_state()
+            used = int(usage["channels"][channel].get("daily") or 0)
+            if used >= limit:
+                if self._is_admin(event):
+                    logger.info(
+                        "[kkt] 通道日配额已满但仍允许管理员: channel=%s used=%d limit=%d",
+                        channel,
+                        used,
+                        limit,
+                    )
+                    return None
+                label = self._CHANNEL_LABELS.get(channel, channel)
+                return f"今日 {label} 额度已用完（{used}/{limit}）"
+            return None
+
+    async def _record_successful_usage(self, channel: str) -> None:
+        """出图成功后 +1 daily 与 total（持久化）。"""
+        if channel not in self._CHANNELS:
+            channel = self._CHANNEL_MAIN
+        async with self._quota_lock:
+            usage = self._load_usage_state()
+            bucket = usage["channels"][channel]
+            bucket["daily"] = int(bucket.get("daily") or 0) + 1
+            bucket["total"] = int(bucket.get("total") or 0) + 1
+            usage["date"] = date.today().isoformat()
+            self._save_usage_state(usage)
+            unit = self._cost_usd_for_channel(channel)
+            logger.info(
+                "[kkt] 用量记账: channel=%s daily=%d total=%d unit_usd=%.4f est=%.4f",
+                channel,
+                bucket["daily"],
+                bucket["total"],
+                unit,
+                bucket["total"] * unit,
+            )
 
     async def _check_and_consume_daily_quota(
-        self, event: AstrMessageEvent
+        self, event: AstrMessageEvent, channel: str | None = None
     ) -> str | None:
-        """检查并消耗单日总配额。
+        """兼容旧接口。
 
-        - daily_quota<=0：不限制
-        - 未超限：count+1 后放行
-        - 已超限：仅管理员可继续（管理员调用不计入额外占用，也可继续调用）
+        - 传入 channel：仅检查该通道日限（成功记账用 _record_successful_usage）
+        - 不传 channel：按 main/daily_quota 预扣（兼容旧单测）
         """
-        if self.daily_quota <= 0:
+        if channel is not None:
+            return await self._check_channel_quota(event, channel)
+
+        limit = 0
+        if getattr(self, "channel_limits", None):
+            limit = int(self.channel_limits.get(self._CHANNEL_MAIN, 0))
+        if getattr(self, "daily_quota", None) is not None:
+            limit = int(self.daily_quota)
+        if limit <= 0:
             return None
 
         async with self._quota_lock:
-            state = self._load_quota_state()
+            # 完整路径
+            if getattr(self, "usage_path", None) is not None:
+                usage = self._load_usage_state()
+                used = int(
+                    usage["channels"][self._CHANNEL_MAIN].get("daily") or 0
+                )
+                if used >= limit:
+                    if self._is_admin(event):
+                        return None
+                    return f"今日额度已用完（{used}/{limit}）"
+                usage["channels"][self._CHANNEL_MAIN]["daily"] = used + 1
+                usage["channels"][self._CHANNEL_MAIN]["total"] = (
+                    int(usage["channels"][self._CHANNEL_MAIN].get("total") or 0)
+                    + 1
+                )
+                usage["date"] = date.today().isoformat()
+                self._save_usage_state(usage)
+                return None
+
+            # 极简路径（单测只挂 quota_path）
+            today = date.today().isoformat()
+            state = {"date": today, "count": 0}
+            path = getattr(self, "quota_path", None)
+            if path is not None and Path(path).exists():
+                try:
+                    data = json.loads(Path(path).read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and str(data.get("date") or "") == today:
+                        state["count"] = max(0, int(data.get("count") or 0))
+                except Exception:
+                    pass
             used = int(state.get("count") or 0)
-            is_admin = self._is_admin(event)
-
-            if used >= self.daily_quota:
-                if is_admin:
-                    logger.info(
-                        "[kkt] 日配额已满但仍允许管理员: used=%d limit=%d",
-                        used,
-                        self.daily_quota,
-                    )
+            if used >= limit:
+                if self._is_admin(event):
                     return None
-                return f"今日额度已用完（{used}/{self.daily_quota}）"
-
+                return f"今日额度已用完（{used}/{limit}）"
             state["count"] = used + 1
-            state["date"] = date.today().isoformat()
-            self._save_quota_state(state)
-            logger.info(
-                "[kkt] 日配额消耗: used=%d/%d admin=%s",
-                state["count"],
-                self.daily_quota,
-                is_admin,
-            )
+            if path is not None:
+                try:
+                    Path(path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(path).write_text(
+                        json.dumps(
+                            state, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
             return None
 
     @classmethod
@@ -900,62 +1297,65 @@ class KktImagePlugin(Star):
             "kkt配额",
             "hajimi配额",
             "image2配额",
+            "kkt统计",
+            "hajimi统计",
+            "image2统计",
         },
     )
     async def handle_quota_status(self, event: AstrMessageEvent, arg: GreedyStr = ""):
-        """查看或设置日配额。
+        """查看或设置分通道日配额（含预估费用）。
 
-        - /kkt额度 -> 查询
-        - /kkt额度 10 -> 管理员将日上限改为 10，已用次数不变
-        hajimi / image2 同义，三通道共用一套配额。
+        - /kkt额度 -> 查询（仅管理员）
+        - /kkt额度 10 -> 两通道日上限改为 10
+        - /kkt额度 main 100 / /kkt额度 image2 20 -> 单通道
         """
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             return
         event.stop_event()
 
-        # 优先用框架解析的 arg；空则从整句再抽一次，兼容 /kkt额度10
+        if not self._is_admin(event):
+            yield event.plain_result("仅管理员可查询或调整额度。")
+            return
+
         raw_arg = str(arg or "").strip()
         if not raw_arg:
             msg = (event.get_message_str() or "").strip()
-            # 去掉命令前缀
             raw_arg = re.sub(
-                r"(?i)^/?(?:kkt|hajimi|image2)(?:额度|限额|配额|quota)\s*",
+                r"(?i)^/?(?:kkt|hajimi|image2)(?:额度|限额|配额|quota|统计)\s*",
                 "",
                 msg,
             ).strip()
 
-        limit = self._parse_quota_limit_arg(raw_arg)
-        # 有参数但解析不出合法数字
-        if raw_arg and limit is None:
-            yield event.plain_result("参数无效。查询：/kkt额度；设置：/kkt额度 10")
+        channel, limit, ok = self._parse_quota_command_arg(raw_arg)
+        if not ok:
+            yield event.plain_result(
+                "参数无效。\n"
+                "查询：/kkt额度\n"
+                "设置：/kkt额度 10 或 /kkt额度 main 100 或 /kkt额度 image2 20"
+            )
             return
 
         if limit is None:
             yield event.plain_result(self._format_quota_status(event))
             return
 
-        if not self._is_admin(event):
-            yield event.plain_result(
-                "仅管理员可调整额度。\n" + self._format_quota_status(event)
-            )
-            return
-
-        old_limit = self.daily_quota
-        result = await self._set_daily_quota_limit(limit)
-        used = int(result["used"])
-        new_limit = int(result["limit"])
-        if new_limit <= 0:
-            head = f"已关闭日限额（已用 {used}）"
+        target = channel or "all"
+        old_limits = dict(self.channel_limits)
+        await self._set_channel_quota_limit(target, limit)
+        if target == "all":
+            head = f"两通道日限额 → {limit}（0=不限制）"
         else:
-            remain = max(0, new_limit - used)
-            head = f"日限额 {old_limit} → {new_limit}（已用 {used}，剩余 {remain}）"
+            label = self._CHANNEL_LABELS.get(target, target)
+            old_v = old_limits.get(target, 0)
+            head = f"{label} 日限额 {old_v} → {limit}（0=不限制）"
         logger.info(
-            "[kkt] 管理员调整日限额: operator=%s old=%d new=%d used=%d",
+            "[kkt] 管理员调整通道限额: operator=%s target=%s limit=%d old=%s new=%s",
             event.get_sender_id(),
-            old_limit,
-            new_limit,
-            used,
+            target,
+            limit,
+            old_limits,
+            self.channel_limits,
         )
         yield event.plain_result(head + "\n" + self._format_quota_status(event))
 
@@ -972,8 +1372,10 @@ class KktImagePlugin(Star):
             "image2清零额度",
         },
     )
-    async def handle_quota_reset(self, event: AstrMessageEvent):
-        """重置今日已用次数（仅管理员）；不改日限额上限。"""
+    async def handle_quota_reset(
+        self, event: AstrMessageEvent, arg: GreedyStr = ""
+    ):
+        """重置今日已用次数（仅管理员）；累计 total 保留；不改日限额。"""
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             return
@@ -981,15 +1383,34 @@ class KktImagePlugin(Star):
         if not self._is_admin(event):
             yield event.plain_result("仅管理员可重置额度。")
             return
-        await self._reset_daily_quota()
-        text = (
-            f"已清零今日已用（上限 {self.daily_quota}）\n"
-            + self._format_quota_status(event)
+        raw_arg = str(arg or "").strip()
+        if not raw_arg:
+            msg = (event.get_message_str() or "").strip()
+            raw_arg = re.sub(
+                r"(?i)^/?(?:kkt|hajimi|image2)(?:重置额度|清零额度|resetquota)\s*",
+                "",
+                msg,
+            ).strip()
+        channel = self._parse_channel_token(raw_arg) if raw_arg else "all"
+        if raw_arg and channel is None:
+            yield event.plain_result(
+                "参数无效。/kkt重置额度 [all|main|image2]"
+            )
+            return
+        if channel is None:
+            channel = "all"
+        await self._reset_channel_quota(channel)
+        label = "全部通道" if channel == "all" else self._CHANNEL_LABELS.get(
+            channel, channel
+        )
+        text = f"已清零今日已用（{label}，累计次数保留）\n" + self._format_quota_status(
+            event
         )
         logger.info(
-            "[kkt] 管理员重置已用次数: operator=%s limit=%d",
+            "[kkt] 管理员重置今日已用: operator=%s channel=%s limits=%s",
             event.get_sender_id(),
-            self.daily_quota,
+            channel,
+            self.channel_limits,
         )
         yield event.plain_result(text)
 
@@ -1117,7 +1538,6 @@ class KktImagePlugin(Star):
         event.stop_event()
 
         # 兼容：/kkt 额度、/kkt 额度 10、/kkt 重置额度 写在主指令参数里
-        # 三通道共用，prompt 来自 /kkt|/hajimi|/image2 参数部分
         prompt_stripped = (prompt or "").strip()
         normalized = re.sub(r"\s+", "", prompt_stripped.lower())
         # 查询
@@ -1128,39 +1548,62 @@ class KktImagePlugin(Star):
             "配额",
             "今日额度",
             "今日限额",
+            "统计",
         }:
+            if not self._is_admin(event):
+                yield event.plain_result("仅管理员可查询额度。")
+                return
             yield event.plain_result(self._format_quota_status(event))
             return
-        # 设置：额度10 / 额度 10 / quota10 / 限额=20
+        # 设置：额度10 / 额度 main 10 / quota image2=20
         set_match = re.fullmatch(
-            r"(?:额度|限额|配额|quota|limit)\s*(?:=|：|:|为|到)?\s*(\d+)",
+            r"(?:额度|限额|配额|quota|limit)\s*(.*)",
             prompt_stripped,
-            flags=re.IGNORECASE,
+            flags=re.IGNORECASE | re.DOTALL,
         )
-        if set_match:
-            if not self._is_admin(event):
+        if set_match and normalized not in {
+            "额度",
+            "限额",
+            "quota",
+            "配额",
+            "今日额度",
+            "今日限额",
+            "统计",
+        }:
+            rest = (set_match.group(1) or "").strip()
+            if rest:
+                if not self._is_admin(event):
+                    yield event.plain_result("仅管理员可调整额度。")
+                    return
+                channel, new_limit, ok = self._parse_quota_command_arg(rest)
+                if not ok or new_limit is None:
+                    yield event.plain_result(
+                        "参数无效。设置：/kkt 额度 10 或 /kkt 额度 main 100"
+                    )
+                    return
+                target = channel or "all"
+                old_limits = dict(self.channel_limits)
+                await self._set_channel_quota_limit(target, new_limit)
+                if target == "all":
+                    head = f"两通道日限额 → {new_limit}"
+                else:
+                    label = self._CHANNEL_LABELS.get(target, target)
+                    head = (
+                        f"{label} 日限额 {old_limits.get(target, 0)} → {new_limit}"
+                    )
+                logger.info(
+                    "[kkt] 管理员调整通道限额(主指令参数): operator=%s target=%s "
+                    "limit=%d old=%s new=%s",
+                    event.get_sender_id(),
+                    target,
+                    new_limit,
+                    old_limits,
+                    self.channel_limits,
+                )
                 yield event.plain_result(
-                    "仅管理员可调整额度。\n" + self._format_quota_status(event)
+                    head + "\n" + self._format_quota_status(event)
                 )
                 return
-            new_limit = int(set_match.group(1))
-            old_limit = self.daily_quota
-            result = await self._set_daily_quota_limit(new_limit)
-            used = int(result["used"])
-            if new_limit <= 0:
-                head = f"已关闭日限额（已用 {used}）"
-            else:
-                remain = max(0, new_limit - used)
-                head = f"日限额 {old_limit} → {new_limit}（已用 {used}，剩余 {remain}）"
-            logger.info(
-                "[kkt] 管理员调整日限额(主指令参数): operator=%s old=%d new=%d used=%d",
-                event.get_sender_id(),
-                old_limit,
-                new_limit,
-                used,
-            )
-            yield event.plain_result(head + "\n" + self._format_quota_status(event))
-            return
         if normalized in {
             "重置额度",
             "清零额度",
@@ -1168,13 +1611,28 @@ class KktImagePlugin(Star):
             "重置配额",
             "清零配额",
             "reset",
-        }:
+        } or re.fullmatch(
+            r"(?:重置额度|清零额度|resetquota|重置配额|清零配额)\s*\S*",
+            prompt_stripped,
+            flags=re.IGNORECASE,
+        ):
             if not self._is_admin(event):
                 yield event.plain_result("仅管理员可重置额度。")
                 return
-            await self._reset_daily_quota()
+            reset_rest = re.sub(
+                r"(?i)^(?:重置额度|清零额度|resetquota|重置配额|清零配额)\s*",
+                "",
+                prompt_stripped,
+            ).strip()
+            ch = self._parse_channel_token(reset_rest) if reset_rest else "all"
+            if reset_rest and ch is None:
+                yield event.plain_result(
+                    "参数无效。/kkt 重置额度 [all|main|image2]"
+                )
+                return
+            await self._reset_channel_quota(ch or "all")
             yield event.plain_result(
-                f"已清零今日已用（上限 {self.daily_quota}）\n"
+                "已清零今日已用（累计次数保留）\n"
                 + self._format_quota_status(event)
             )
             return
@@ -1269,8 +1727,9 @@ class KktImagePlugin(Star):
             yield event.plain_result(cd_msg)
             return
 
-        # 单日总配额（超限后仅管理员可继续）
-        quota_msg = await self._check_and_consume_daily_quota(event)
+        # 分通道日限额：仅检查，成功出图后再记账（失败不扣）
+        billing_channel = self._channel_for_command(command)
+        quota_msg = await self._check_channel_quota(event, billing_channel)
         if quota_msg:
             yield event.plain_result(quota_msg)
             return
@@ -1286,9 +1745,10 @@ class KktImagePlugin(Star):
 
         try:
             logger.info(
-                "[kkt] 开始调用图像 API: command=%s model=%s key_count=%d "
+                "[kkt] 开始调用图像 API: command=%s channel=%s model=%s key_count=%d "
                 "image_count=%d label_images=%s image2_mode=%s",
                 command,
+                billing_channel,
                 model,
                 len(api_keys),
                 len(image_items),
@@ -1312,11 +1772,13 @@ class KktImagePlugin(Star):
             if not image_path:
                 yield event.plain_result("图片下载或解析失败，请稍后重试。")
                 return
+            await self._record_successful_usage(billing_channel)
             elapsed_seconds = max(1, int(round(time.monotonic() - started_at)))
             logger.info(
-                "[kkt] 图片处理成功: path=%s elapsed=%ss",
+                "[kkt] 图片处理成功: path=%s elapsed=%ss channel=%s",
                 image_path,
                 elapsed_seconds,
+                billing_channel,
             )
             yield event.chain_result(
                 self._build_image_chain(
