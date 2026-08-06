@@ -435,6 +435,9 @@ def test_build_help_text_is_concise():
     md = build_user_help_markdown()
     assert md.startswith("# 康康图")
     assert "/gk" in md and "/gifz" in md
+    assert "使用说明" in md
+    assert "合并转发" in md or "过程" in md
+    assert "猫娘" not in md
     aliases = build_alias_help_text()
     assert "kktquota" not in aliases
     assert "hajimi额度" not in aliases

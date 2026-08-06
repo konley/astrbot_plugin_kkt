@@ -2,7 +2,7 @@
 
 AstrBot 多通道媒体插件，支持 OpenAI 兼容生图/修图、Grok Images API、Grok 2K 文生图、GIF 分镜，以及 grok2api 异步视频。插件包含 `KKT Studio` WebUI 控制台，用于连接测试、运行状态查看和常用参数管理。
 
-当前版本：`0.19.1`
+当前版本：`0.19.2`
 
 ## 功能总览
 
@@ -153,7 +153,7 @@ video_command_aliases = grokv, gkv, gv
 
 别名只能是单个指令 token；与其他主指令冲突的值会被忽略并写入日志。视频别名还支持 `/别名5` 形式。
 
-`/kkt帮助` 优先用本地 T2I 渲染一张 Markdown 帮助卡（含常用别名）；失败时回退为同结构纯文本。
+`/kkt帮助` 优先用 **pillowmd** 渲染（复用本机 `astrbot_plugin_outputpro/t2i_style` 中文字体样式，不硬依赖该插件进程）；失败再回退 AstrBot 自带 T2I，再失败则纯文本。
 
 ### Grok 工作流
 

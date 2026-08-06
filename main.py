@@ -290,57 +290,110 @@ def _help_cmd_line(
     return f"{primary}  {desc}"
 
 
+def _help_md_item(names: list[str], desc: str, *, skip_z_bases: bool = False) -> str:
+    """One markdown list item: **primary** · aliases — desc."""
+    if not names:
+        return ""
+    primary = names[0]
+    aliases = _help_short_aliases(names, max_n=5, skip_z_bases=skip_z_bases)
+    head = f"**/{primary}**"
+    if aliases:
+        head += " · " + " · ".join(f"/{a}" for a in aliases)
+    return f"- {head}  \n  {desc}"
+
+
 def build_user_help_markdown(
     command_groups: dict[str, dict[str, object]] | None = None,
 ) -> str:
-    """Markdown help card for T2I（含常用别名，无内部实现话术）。"""
+    """Markdown help for pillowmd/outputpro-style T2I（含常用别名与用法说明）。"""
     groups = command_groups or _default_help_groups()
     g = lambda key, fb: _help_group_names(groups, key, fb)  # noqa: E731
 
     lines = [
-        "# 康康图",
+        "# 康康图 · 使用说明",
         "",
-        "## 生图",
-        _help_cmd_line(g("main", ["hajimi", "kkt"]), "文生图 / 修图 / 参考图"),
-        _help_cmd_line(g("grok", ["grok", "gk"]), "Grok 生图"),
-        _help_cmd_line(g("grok2", ["grok2", "grok2k", "gk2"]), "2K 文生图"),
-        _help_cmd_line(g("image2", ["image2"]), "独立通道"),
+        "多通道生图 / 视频 / GIF。下面 **粗体** 是主指令，后面是常用别名。",
         "",
-        "## 视频与 GIF",
-        _help_cmd_line(
+        "## 一、生图",
+        "",
+        _help_md_item(
+            g("main", ["hajimi", "kkt"]),
+            "文生图、修图；支持附图、引用图、@头像作参考。",
+        ),
+        _help_md_item(
+            g("grok", ["grok", "gk"]),
+            "Grok 生图 / 图生图，可多图参考。",
+        ),
+        _help_md_item(
+            g("grok2", ["grok2", "grok2k", "gk2", "gk2k"]),
+            "Grok 2K 文生图，只接受文字，不要附图。",
+        ),
+        _help_md_item(
+            g("image2", ["image2"]),
+            "独立 Image2 通道（单独 Key / 模型）。",
+        ),
+        "",
+        "写法示例：`/kkt 一只橘猫`　`/gk 改成赛博风格`（附图或引用）",
+        "",
+        "## 二、视频与 GIF",
+        "",
+        _help_md_item(
             g("video", ["grokvideo", "grokv", "gkv", "gv"]),
-            "文/图生视频（可 /gv5 指定秒数）",
+            "文生 / 图生视频。可写秒数：`/gv5 猫在雨中跑`（1–15 秒）。最多 1 张首帧图。",
         ),
-        _help_cmd_line(g("main_gif", ["hajimigif", "kktgif"]), "16 帧分镜 GIF"),
-        _help_cmd_line(g("main_gif2", ["hajimigif2"]), "9 帧分镜 GIF"),
-        _help_cmd_line(g("image2_gif", ["image2gif"]), "Image2 · 16 帧"),
-        _help_cmd_line(g("image2_gif2", ["image2gif2"]), "Image2 · 9 帧"),
-        "/kkgif  视频转 GIF",
-        _help_cmd_line(
+        _help_md_item(
+            g("main_gif", ["hajimigif", "kktgif"]),
+            "主通道 4×4 分镜 → 16 帧 GIF。",
+        ),
+        _help_md_item(
+            g("main_gif2", ["hajimigif2"]),
+            "主通道 3×3 分镜 → 9 帧 GIF。",
+        ),
+        _help_md_item(
+            g("image2_gif", ["image2gif"]),
+            "Image2 通道 16 帧分镜 GIF。",
+        ),
+        _help_md_item(
+            g("image2_gif2", ["image2gif2"]),
+            "Image2 通道 9 帧分镜 GIF。",
+        ),
+        "- **/kkgif**  \n  引用或附带 **一个视频** → 本地转 GIF（最长 16 秒）。",
+        _help_md_item(
             g("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
-            "压缩 GIF（/gifz3 = 3 档）",
+            "压缩视频或 GIF。档位：`/gifz`～`/gifz5`（数字越大越狠）。不支持静态图。",
         ),
         "",
-        "## 工作流",
-        _help_cmd_line(
+        "## 三、Grok 工作流（推荐）",
+        "",
+        "提示词按 **视频内容** 来写。全套会先生成「适合当首帧」的图，再出视频，最后出 GIF。",
+        "",
+        _help_md_item(
             g("grokpack", ["grokpack", "gkpack", "gkp"]),
-            "图 → 视频 → GIF",
+            "全套：图 → 视频 → GIF。取图逻辑同 /grok。",
             skip_z_bases=True,
         ),
-        "/grokpackz · /gkpz1-5  同上，成品压缩",
-        _help_cmd_line(
+        "- **/grokpackz** · /gkpz · /gkpz1-5  \n  全套 + 最终 GIF 压缩档。",
+        _help_md_item(
             g("grokvg", ["grokvg", "gkvg", "gvg"]),
-            "视频 → GIF",
+            "视频套：视频 → GIF。取图逻辑同 /grokvideo（最多 1 张首帧）。",
             skip_z_bases=True,
         ),
-        "/grokvgz · /gvgz1-5  同上，成品压缩",
+        "- **/grokvgz** · /gvgz · /gvgz1-5  \n  视频套 + 最终 GIF 压缩档。",
         "",
-        "工作流提示词 = 视频意图；全套会先出首帧图。",
-        "完成后：一条过程合并转发 + 一条最终 GIF。",
+        "完成后只有 **两条消息**：",
+        "1. 合并转发：过程说明 + 过程产物（图/视频）",
+        "2. 单独一条：最终 GIF 成品",
         "",
-        "## 管理",
-        "/kkt额度  /kkt重置额度  /kkt审核",
-        "/kkt帮助",
+        "示例：`/gkp 一只猫在雨中挥手`　`/gkpz3 同上，3 档压缩`",
+        "",
+        "## 四、管理（管理员）",
+        "",
+        "- **/kkt额度** — 查询 / 设置日额度",
+        "- **/kkt重置额度** — 清零今日已用",
+        "- **/kkt审核** — 本地敏感词开关",
+        "- **/kkt帮助** — 本说明",
+        "",
+        "> 别名可在插件配置 / KKT Studio 中修改；完整别名表见 WebUI。",
     ]
     return "\n".join(line for line in lines if line is not None)
 
@@ -348,48 +401,52 @@ def build_user_help_markdown(
 def build_user_help_plain(
     command_groups: dict[str, dict[str, object]] | None = None,
 ) -> str:
-    """Plain-text fallback with the same structure (no markdown headers)."""
+    """Plain-text fallback with the same information density."""
     groups = command_groups or _default_help_groups()
     g = lambda key, fb: _help_group_names(groups, key, fb)  # noqa: E731
     lines = [
-        "康康图",
+        "康康图 · 使用说明",
+        "粗体位=主指令，后面是常用别名。",
         "",
         "【生图】",
-        _help_cmd_line(g("main", ["hajimi", "kkt"]), "文生图/修图"),
-        _help_cmd_line(g("grok", ["grok", "gk"]), "Grok 生图"),
-        _help_cmd_line(g("grok2", ["grok2", "grok2k", "gk2"]), "2K 文生图"),
+        _help_cmd_line(g("main", ["hajimi", "kkt"]), "文生图/修图，可附图引用@"),
+        _help_cmd_line(g("grok", ["grok", "gk"]), "Grok 生图/图生图"),
+        _help_cmd_line(g("grok2", ["grok2", "grok2k", "gk2"]), "2K 仅文字"),
         _help_cmd_line(g("image2", ["image2"]), "独立通道"),
+        "例：/kkt 一只橘猫　/gk 改成赛博风（附图）",
         "",
         "【视频 / GIF】",
         _help_cmd_line(
             g("video", ["grokvideo", "grokv", "gkv", "gv"]),
-            "文/图生视频（/gv5=秒数）",
+            "文/图生视频；/gv5=秒数(1-15)",
         ),
-        _help_cmd_line(g("main_gif", ["hajimigif", "kktgif"]), "16 帧分镜"),
-        _help_cmd_line(g("main_gif2", ["hajimigif2"]), "9 帧分镜"),
-        _help_cmd_line(g("image2_gif", ["image2gif"]), "Image2 16 帧"),
-        _help_cmd_line(g("image2_gif2", ["image2gif2"]), "Image2 9 帧"),
-        "/kkgif  视频转 GIF",
+        _help_cmd_line(g("main_gif", ["hajimigif", "kktgif"]), "16帧分镜GIF"),
+        _help_cmd_line(g("main_gif2", ["hajimigif2"]), "9帧分镜GIF"),
+        _help_cmd_line(g("image2_gif", ["image2gif"]), "Image2 16帧"),
+        _help_cmd_line(g("image2_gif2", ["image2gif2"]), "Image2 9帧"),
+        "/kkgif  一个视频→GIF(最长16秒)",
         _help_cmd_line(
             g("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
-            "压缩（/gifz3）",
+            "压缩视频/GIF；/gifz3=3档",
         ),
         "",
-        "【工作流】",
+        "【工作流】提示词=视频意图",
         _help_cmd_line(
             g("grokpack", ["grokpack", "gkpack", "gkp"]),
             "图→视频→GIF",
             skip_z_bases=True,
         ),
-        "/grokpackz · /gkpz1-5  压缩成品",
+        "/grokpackz · /gkpz1-5  全套+压缩成品",
         _help_cmd_line(
             g("grokvg", ["grokvg", "gkvg", "gvg"]),
             "视频→GIF",
             skip_z_bases=True,
         ),
-        "/grokvgz · /gvgz1-5  压缩成品",
+        "/grokvgz · /gvgz1-5  视频套+压缩成品",
+        "完成：①过程合并转发 ②最终GIF单独发",
+        "例：/gkp 猫在雨中挥手　/gkpz3 …",
         "",
-        "【管理】/kkt额度  /kkt重置额度  /kkt审核",
+        "【管理】/kkt额度  /kkt重置额度  /kkt审核  /kkt帮助",
     ]
     return "\n".join(lines)
 
@@ -491,7 +548,7 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.19.1",
+    "0.19.2",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -4205,37 +4262,125 @@ class KktImagePlugin(Star, KktWebApiMixin):
         # 2) 纯文本（结构与图一致）
         yield event.plain_result(plain_text)
 
+    def _resolve_pillowmd_style_dirs(self) -> list[Path]:
+        """Prefer outputpro notebook style (中文字体)；不硬依赖插件进程。"""
+        candidates: list[Path] = []
+        # 0) 环境变量优先
+        env = str(os.getenv("KKT_PILLOWMD_STYLE_DIR", "") or "").strip()
+        if env:
+            candidates.append(Path(env).expanduser())
+
+        roots: list[Path] = []
+        try:
+            roots.append(Path(get_astrbot_data_path()))
+        except Exception:
+            pass
+        # 生产常见根（get_astrbot_data_path 在开发 cwd 下可能指向 workspace）
+        for extra in (
+            Path("/opt/astrbot/data"),
+            Path("/AstrBot/data"),
+            Path.home() / "AstrBot" / "data",
+        ):
+            roots.append(extra)
+        # 插件自身所在 data/plugins 的上级
+        try:
+            plugin_file = Path(__file__).resolve()
+            # .../data/plugins/astrbot_plugin_kkt/main.py → data
+            if plugin_file.parent.name.startswith("astrbot_plugin"):
+                roots.append(plugin_file.parent.parent.parent)
+        except Exception:
+            pass
+
+        for root in roots:
+            candidates.append(
+                root / "plugins" / "astrbot_plugin_outputpro" / "t2i_style"
+            )
+            candidates.append(
+                root / "addons" / "plugins" / "astrbot_plugin_outputpro" / "t2i_style"
+            )
+        try:
+            candidates.append(Path(__file__).resolve().parent / "t2i_style")
+        except Exception:
+            pass
+
+        out: list[Path] = []
+        seen: set[str] = set()
+        for path in candidates:
+            try:
+                key = str(path.resolve()) if path.exists() else str(path)
+            except Exception:
+                key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if path.is_dir() and (path / "setting.yml").is_file():
+                out.append(path)
+        return out
+
     async def _render_help_t2i(self, markdown_text: str) -> str | None:
-        """Render help markdown to a local image path; None on failure."""
+        """Render help via pillowmd(outputpro 同款) → AstrBot t2i 回退。"""
+        cache_dir = self.temp_dir / "help_t2i"
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            cache_dir = self.temp_dir
+
+        # —— 优先：pillowmd + outputpro 中文字体样式（避免方块乱码）——
+        try:
+            import pillowmd  # type: ignore
+        except Exception as exc:
+            logger.debug("[kkt] pillowmd 未安装，跳过: %s", exc)
+            pillowmd = None  # type: ignore
+
+        if pillowmd is not None:
+            for style_dir in self._resolve_pillowmd_style_dirs():
+                try:
+                    style = pillowmd.LoadMarkdownStyles(style_dir)
+                    rendered = await style.AioRender(
+                        text=markdown_text,
+                        useImageUrl=False,
+                        autoPage=True,
+                    )
+                    saved = rendered.Save(cache_dir)
+                    path = Path(str(saved))
+                    if path.is_file() and path.stat().st_size > 1024:
+                        logger.info(
+                            "[kkt] 帮助 pillowmd 成功: style=%s path=%s size=%d",
+                            style_dir,
+                            path,
+                            path.stat().st_size,
+                        )
+                        return str(path.resolve())
+                except Exception as exc:
+                    logger.warning(
+                        "[kkt] pillowmd 渲染失败 style=%s: %s", style_dir, exc
+                    )
+
+        # —— 回退：AstrBot 自带 html_renderer（可能缺中文字体）——
         try:
             from astrbot.api import html_renderer
         except Exception as exc:
             logger.debug("[kkt] html_renderer 不可用: %s", exc)
             return None
-        try:
-            path = await html_renderer.render_t2i(
-                markdown_text,
-                use_network=False,
-                return_url=False,
-                template_name="base",
-            )
-            if path and Path(str(path)).is_file():
-                logger.info("[kkt] 帮助 T2I 成功: path=%s", path)
-                return str(path)
-        except Exception as exc:
-            logger.warning("[kkt] 本地 T2I 失败，尝试远端: %s", exc)
-        try:
-            path = await html_renderer.render_t2i(
-                markdown_text,
-                use_network=True,
-                return_url=False,
-                template_name="base",
-            )
-            if path and Path(str(path)).is_file():
-                logger.info("[kkt] 帮助 T2I 远端成功: path=%s", path)
-                return str(path)
-        except Exception as exc:
-            logger.warning("[kkt] 帮助 T2I 失败: %s", exc)
+        for use_network in (False, True):
+            try:
+                path = await html_renderer.render_t2i(
+                    markdown_text,
+                    use_network=use_network,
+                    return_url=False,
+                    template_name="base",
+                )
+                if path and Path(str(path)).is_file():
+                    logger.info(
+                        "[kkt] 帮助 T2I 回退成功: network=%s path=%s",
+                        use_network,
+                        path,
+                    )
+                    return str(path)
+            except Exception as exc:
+                logger.warning(
+                    "[kkt] 帮助 T2I 回退失败 network=%s: %s", use_network, exc
+                )
         return None
 
     @filter.command(
