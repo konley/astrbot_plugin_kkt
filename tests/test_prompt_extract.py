@@ -1117,8 +1117,23 @@ def test_kkgifzip_level_parser_and_presets():
     assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip5")) == 5
     assert set(Plugin._KKGIFZIP_PRESETS) == {1, 2, 3, 4, 5}
     assert Plugin._KKGIFZIP_PRESETS[1]["dimension"] > Plugin._KKGIFZIP_PRESETS[5]["dimension"]
+    # 全档固定约 10fps，不靠降帧变糊
+    assert all(int(p["fps"]) == 10 for p in Plugin._KKGIFZIP_PRESETS.values())
+    assert float(Plugin._KKGIFZIP_PRESETS[5]["crush"]) > float(
+        Plugin._KKGIFZIP_PRESETS[1]["crush"]
+    )
+    graph = plugin._kkgifzip_filter_graph(
+        dimension=180,
+        fps=10,
+        colors=48,
+        crush=2.5,
+        blur=0.75,
+        dither="none",
+    )
+    assert "flags=neighbor" in graph and "gblur=sigma=0.75" in graph
+    assert "palettegen=max_colors=48" in graph and "dither=none" in graph
     help_text = Plugin._kkgifzip_help_text(plugin)
-    assert "/kkgifzip1-5" in help_text and "静态" in help_text
+    assert "/kkgifzip1-5" in help_text and "静态" in help_text and "crush" in help_text
 
 
 def test_kkgifzip_command_names_in_parser_and_catalog():

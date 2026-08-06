@@ -303,7 +303,7 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.18.0",
+    "0.18.1",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -373,13 +373,49 @@ class KktImagePlugin(Star, KktWebApiMixin):
         r"^/?(?:kkgifzip[1-5]?|kkgif|grokvideo\d+|grokv\d+|gkv\d+|gv\d+|grokvideo|grokv|gkv|gv|grok2k|gk2k|gk2|grok2|grok|gk|image2gif2|image2gif|hajimigif2|hajimigif|kktgif|hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
         re.IGNORECASE | re.DOTALL,
     )
-    # /kkgifzip 五档：边长 / fps / 色数（越大档越糊越小）
-    _KKGIFZIP_PRESETS: ClassVar[dict[int, dict[str, int]]] = {
-        1: {"dimension": 360, "fps": 10, "colors": 192},
-        2: {"dimension": 280, "fps": 8, "colors": 128},
-        3: {"dimension": 220, "fps": 6, "colors": 96},
-        4: {"dimension": 160, "fps": 5, "colors": 64},
-        5: {"dimension": 120, "fps": 4, "colors": 48},
+    # /kkgifzip 五档：固定 ~10fps；靠分辨率/色数/像素块(crush)/模糊做出「糊 JPG」感
+    # crush：先缩到 dim/crush 再用 neighbor 放大 → 色块感；blur：gblur sigma
+    _KKGIFZIP_PRESETS: ClassVar[dict[int, dict[str, float | int | str]]] = {
+        1: {
+            "dimension": 280,
+            "fps": 10,
+            "colors": 96,
+            "crush": 1.6,
+            "blur": 0.35,
+            "dither": "bayer:bayer_scale=2",
+        },
+        2: {
+            "dimension": 220,
+            "fps": 10,
+            "colors": 64,
+            "crush": 2.0,
+            "blur": 0.55,
+            "dither": "bayer:bayer_scale=3",
+        },
+        3: {
+            "dimension": 180,
+            "fps": 10,
+            "colors": 48,
+            "crush": 2.5,
+            "blur": 0.75,
+            "dither": "none",
+        },
+        4: {
+            "dimension": 140,
+            "fps": 10,
+            "colors": 32,
+            "crush": 3.2,
+            "blur": 0.95,
+            "dither": "none",
+        },
+        5: {
+            "dimension": 100,
+            "fps": 10,
+            "colors": 24,
+            "crush": 4.0,
+            "blur": 1.2,
+            "dither": "none",
+        },
     }
     _KKGIFZIP_LEVEL_RE = re.compile(
         r"^/?kkgifzip([1-5])?(?:帮助|help|\?)?$",
@@ -2984,8 +3020,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
             source_path = await component.convert_to_file_path()
             await event.send(
                 event.plain_result(
-                    f"喵～正在按档位 {level} 压缩"
-                    f"（{preset['dimension']}px / {preset['fps']}fps / {preset['colors']}色），马上就好啦。"
+                    f"喵～正在按档位 {level} 压成糊 JPG 风"
+                    f"（{int(preset['dimension'])}px · {int(preset['fps'])}fps · "
+                    f"{int(preset['colors'])}色 · crush×{preset['crush']}），马上就好啦。"
                 )
             )
             if source_kind == "video":
@@ -3076,17 +3113,18 @@ class KktImagePlugin(Star, KktWebApiMixin):
 
     def _kkgifzip_help_text(self) -> str:
         lines = [
-            "康康 GIF 压缩（表情包风）",
+            "康康 GIF 压缩（糊 JPG / 表情包风）",
             "用法：引用或附带一个视频 / GIF 后发送 /kkgifzip 或 /kkgifzip1-5",
-            "裸 /kkgifzip = 第 1 档；数字越大越糊越小。",
+            "裸 /kkgifzip = 第 1 档；数字越大越糊（像素块 + 少色 + 轻模糊）。",
+            "各档帧率固定约 10fps，不靠降帧变糊。",
             "不支持静态图片（jpg/png 等）。",
             "",
             "档位：",
         ]
         for level, preset in self._KKGIFZIP_PRESETS.items():
             lines.append(
-                f"  {level}：{preset['dimension']}px · {preset['fps']}fps · "
-                f"{preset['colors']}色"
+                f"  {level}：{int(preset['dimension'])}px · {int(preset['fps'])}fps · "
+                f"{int(preset['colors'])}色 · crush×{preset['crush']} · blur {preset['blur']}"
             )
         lines.append("限制：视频最长 16 秒；输出不含声音。")
         return "\n".join(lines)
@@ -3321,6 +3359,40 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 raise RuntimeError("系统未安装 ffmpeg/ffprobe") from exc
         raise RuntimeError(f"GIF 转换失败: {last_error}")
 
+    def _kkgifzip_filter_graph(
+        self,
+        *,
+        dimension: int,
+        fps: int,
+        colors: int,
+        crush: float,
+        blur: float,
+        dither: str,
+    ) -> str:
+        """Build meme/JPG-like GIF filters: soft scale → pixel crush → blur → palette."""
+        crush = max(1.0, float(crush))
+        blur = max(0.0, float(blur))
+        # 先 bilinear 缩到目标边长，再按 crush 缩到小图并用 neighbor 放大 → 色块/像素感
+        #（比单纯 lanczos 高清缩放更像糊 JPG / 表情包）
+        chain = (
+            f"[0:v]fps={fps},"
+            f"scale={dimension}:{dimension}:force_original_aspect_ratio=decrease:flags=bilinear"
+        )
+        if crush > 1.05:
+            chain += (
+                f",scale=iw/{crush}:ih/{crush}:flags=bilinear,"
+                f"scale={dimension}:{dimension}:flags=neighbor"
+            )
+        if blur > 0.05:
+            chain += f",gblur=sigma={blur}"
+        # stats_mode=single：整段共用一盘调色板，色带更硬；dither=none 更像劣质 JPG 色块
+        chain += (
+            f",split[a][b];"
+            f"[a]palettegen=max_colors={colors}:stats_mode=single[p];"
+            f"[b][p]paletteuse=dither={dither}"
+        )
+        return chain
+
     async def _convert_media_to_zip_gif(
         self,
         source_path: str,
@@ -3328,12 +3400,15 @@ class KktImagePlugin(Star, KktWebApiMixin):
         level: int,
         source_kind: str,
     ) -> tuple[str, float, int, int, int]:
-        """Compress video or GIF to meme-style GIF by preset level (1-5)."""
+        """Compress video or GIF to meme/JPG-like GIF by preset level (1-5)."""
         level = max(1, min(5, int(level)))
         preset = self._KKGIFZIP_PRESETS[level]
         base_dimension = int(preset["dimension"])
         base_fps = int(preset["fps"])
         base_colors = int(preset["colors"])
+        base_crush = float(preset["crush"])
+        base_blur = float(preset["blur"])
+        base_dither = str(preset["dither"])
 
         if source_kind == "video":
             duration = await self._probe_video_duration(source_path)
@@ -3350,24 +3425,29 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 time_limit = float(self.video_gif_max_duration)
                 duration = time_limit
 
-        attempts: list[tuple[int, int, int]] = []
+        # 超限时只再砍分辨率/色数/加强 crush，不降 fps（避免变卡）
+        attempts: list[tuple[int, int, int, float, float, str]] = []
         for step in range(3):
-            dimension = max(80, base_dimension - step * 40)
-            fps = max(3, base_fps - step)
-            colors = max(32, base_colors - step * 16)
-            attempts.append((dimension, fps, colors))
+            dimension = max(72, base_dimension - step * 36)
+            colors = max(16, base_colors - step * 12)
+            crush = min(6.0, base_crush + step * 0.6)
+            blur = min(2.0, base_blur + step * 0.15)
+            dither = base_dither if step == 0 else "none"
+            attempts.append((dimension, base_fps, colors, crush, blur, dither))
 
         last_error = "未知错误"
-        for dimension, fps, colors in attempts:
+        for dimension, fps, colors, crush, blur, dither in attempts:
             stamp = int(time.time() * 1000)
             output_path = (
                 self.temp_dir / f"kkt_gifzip_{stamp}_l{level}_{dimension}.gif"
             )
-            filter_graph = (
-                f"[0:v]fps={fps},scale={dimension}:{dimension}:"
-                "force_original_aspect_ratio=decrease:flags=lanczos,split[a][b];"
-                f"[a]palettegen=max_colors={colors}:stats_mode=diff[p];"
-                "[b][p]paletteuse=dither=bayer:bayer_scale=3"
+            filter_graph = self._kkgifzip_filter_graph(
+                dimension=dimension,
+                fps=fps,
+                colors=colors,
+                crush=crush,
+                blur=blur,
+                dither=dither,
             )
             command = [
                 "ffmpeg",
@@ -3405,11 +3485,12 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 if size > self.video_gif_max_bytes:
                     logger.warning(
                         "[kkt] kkgifzip 输出过大: level=%d dimension=%d fps=%d "
-                        "colors=%d bytes=%d limit=%d",
+                        "colors=%d crush=%.1f bytes=%d limit=%d",
                         level,
                         dimension,
                         fps,
                         colors,
+                        crush,
                         size,
                         self.video_gif_max_bytes,
                     )
