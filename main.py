@@ -214,110 +214,229 @@ def _default_help_groups() -> dict[str, dict[str, object]]:
     return groups
 
 
+def _help_group_names(
+    groups: dict[str, dict[str, object]],
+    key: str,
+    fallback: list[str] | None = None,
+) -> list[str]:
+    item = groups.get(key) or {}
+    names = [str(name) for name in item.get("names", []) if str(name).strip()]
+    return names or list(fallback or [])
+
+
+def _help_is_noise_alias(name: str) -> bool:
+    """Skip admin/help synonym spam in user-facing alias lists."""
+    n = str(name or "").casefold()
+    if not n:
+        return True
+    noise = (
+        "帮助",
+        "help",
+        "额度",
+        "限额",
+        "配额",
+        "统计",
+        "quota",
+        "重置",
+        "reset",
+        "清零",
+        "审核",
+        "过滤",
+        "sensitive",
+    )
+    return any(token in n for token in noise)
+
+
+def _help_short_aliases(names: list[str], *, max_n: int = 5) -> list[str]:
+    """Up to max_n short daily-use aliases (skip primary)."""
+    if not names:
+        return []
+    out: list[str] = []
+    for name in names[1:]:
+        if _help_is_noise_alias(name):
+            continue
+        # 跳过纯时长数字后缀（grokv5）；保留 zip 档位基名由文案说明
+        if re.fullmatch(r".+\d+", name):
+            base = re.sub(r"\d+$", "", name)
+            if base.casefold() not in {n.casefold() for n in names[:6]}:
+                continue
+            if not (base.casefold().endswith("z") or "zip" in base.casefold()):
+                continue
+        # 工作流 z 基名已在单独行写 gkpz1-5，列表里可留 gkpz 本身
+        out.append(name)
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def _help_cmd_line(names: list[str], desc: str, *, max_alias: int = 5) -> str:
+    if not names:
+        return ""
+    primary = f"/{names[0]}"
+    aliases = _help_short_aliases(names, max_n=max_alias)
+    if aliases:
+        alias_part = " · ".join(f"/{a}" for a in aliases)
+        return f"{primary} · {alias_part}  {desc}"
+    return f"{primary}  {desc}"
+
+
+def build_user_help_markdown(
+    command_groups: dict[str, dict[str, object]] | None = None,
+) -> str:
+    """Markdown help card for T2I（含常用别名，无内部实现话术）。"""
+    groups = command_groups or _default_help_groups()
+    g = lambda key, fb: _help_group_names(groups, key, fb)  # noqa: E731
+
+    lines = [
+        "# 康康图",
+        "",
+        "## 生图",
+        _help_cmd_line(g("main", ["hajimi", "kkt"]), "文生图 / 修图 / 参考图"),
+        _help_cmd_line(g("grok", ["grok", "gk"]), "Grok 生图"),
+        _help_cmd_line(g("grok2", ["grok2", "grok2k", "gk2"]), "2K 文生图"),
+        _help_cmd_line(g("image2", ["image2"]), "独立通道"),
+        "",
+        "## 视频与 GIF",
+        _help_cmd_line(
+            g("video", ["grokvideo", "grokv", "gkv", "gv"]),
+            "文/图生视频（可 /gv5 指定秒数）",
+        ),
+        _help_cmd_line(g("main_gif", ["hajimigif", "kktgif"]), "16 帧分镜 GIF"),
+        _help_cmd_line(g("main_gif2", ["hajimigif2"]), "9 帧分镜 GIF"),
+        _help_cmd_line(g("image2_gif", ["image2gif"]), "Image2 · 16 帧"),
+        _help_cmd_line(g("image2_gif2", ["image2gif2"]), "Image2 · 9 帧"),
+        "/kkgif  视频转 GIF",
+        _help_cmd_line(
+            g("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
+            "压缩 GIF（/gifz3 = 3 档）",
+        ),
+        "",
+        "## 工作流",
+        _help_cmd_line(
+            g("grokpack", ["grokpack", "gkpack", "gkp"]),
+            "图 → 视频 → GIF",
+        ),
+        "/grokpackz · /gkpz1-5  同上，成品压缩",
+        _help_cmd_line(
+            g("grokvg", ["grokvg", "gkvg", "gvg"]),
+            "视频 → GIF",
+        ),
+        "/grokvgz · /gvgz1-5  同上，成品压缩",
+        "",
+        "工作流提示词 = 视频意图；全套会先出首帧图。",
+        "完成后：一条过程合并转发 + 一条最终 GIF。",
+        "",
+        "## 管理",
+        "/kkt额度  /kkt重置额度  /kkt审核",
+        "/kkt帮助",
+    ]
+    return "\n".join(line for line in lines if line is not None)
+
+
+def build_user_help_plain(
+    command_groups: dict[str, dict[str, object]] | None = None,
+) -> str:
+    """Plain-text fallback with the same structure (no markdown headers)."""
+    groups = command_groups or _default_help_groups()
+    g = lambda key, fb: _help_group_names(groups, key, fb)  # noqa: E731
+    lines = [
+        "康康图",
+        "",
+        "【生图】",
+        _help_cmd_line(g("main", ["hajimi", "kkt"]), "文生图/修图"),
+        _help_cmd_line(g("grok", ["grok", "gk"]), "Grok 生图"),
+        _help_cmd_line(g("grok2", ["grok2", "grok2k", "gk2"]), "2K 文生图"),
+        _help_cmd_line(g("image2", ["image2"]), "独立通道"),
+        "",
+        "【视频 / GIF】",
+        _help_cmd_line(
+            g("video", ["grokvideo", "grokv", "gkv", "gv"]),
+            "文/图生视频（/gv5=秒数）",
+        ),
+        _help_cmd_line(g("main_gif", ["hajimigif", "kktgif"]), "16 帧分镜"),
+        _help_cmd_line(g("main_gif2", ["hajimigif2"]), "9 帧分镜"),
+        _help_cmd_line(g("image2_gif", ["image2gif"]), "Image2 16 帧"),
+        _help_cmd_line(g("image2_gif2", ["image2gif2"]), "Image2 9 帧"),
+        "/kkgif  视频转 GIF",
+        _help_cmd_line(
+            g("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
+            "压缩（/gifz3）",
+        ),
+        "",
+        "【工作流】",
+        _help_cmd_line(
+            g("grokpack", ["grokpack", "gkpack", "gkp"]),
+            "图→视频→GIF",
+        ),
+        "/grokpackz · /gkpz1-5  压缩成品",
+        _help_cmd_line(
+            g("grokvg", ["grokvg", "gkvg", "gvg"]),
+            "视频→GIF",
+        ),
+        "/grokvgz · /gvgz1-5  压缩成品",
+        "",
+        "【管理】/kkt额度  /kkt重置额度  /kkt审核",
+    ]
+    return "\n".join(lines)
+
+
 def build_basic_help_text(
     command_groups: dict[str, dict[str, object]] | None = None,
 ) -> str:
-    """Build the short, canonical-only help section."""
-    groups = command_groups or _default_help_groups()
-    lines = ["康康图 · 基础操作"]
-    descriptions = {
-        "main": "文生图、修图、多图参考、引用图和 @头像",
-        "image2": "独立通道；Images 模式最多一张参考图",
-        "grok": "Grok Images 文生图/图生图，支持多图",
-        "grok2": "Grok 2K 文生图，仅文字提示词",
-        "video": "文生/图生视频；支持 1-15 秒和一张首帧",
-    }
-    for key in ("main", "image2", "grok", "grok2", "video"):
-        item = groups.get(key) or {}
-        names = [str(name) for name in item.get("names", [])]
-        if not names:
-            continue
-        lines.append(
-            f"{item.get('label') or key}：/{names[0]} <提示词>（{descriptions[key]}）"
-        )
-    lines.append(
-        "GIF 分镜：/hajimigif（16帧） /hajimigif2（9帧） "
-        "/image2gif（16帧） /image2gif2（9帧）；视频转 GIF：/kkgif；"
-        "压 GIF：/kkgifzip|/gifz 1-5"
-    )
-    lines.append(
-        "Grok 工作流：/grokpack 图+视频+GIF；/grokvg 视频+GIF；"
-        "带 z/1-5 为压缩 GIF（过程进合并转发，成品单独发）"
-    )
-    lines.append(
-        "管理：/kkt额度 [main|image2|video] [数量]；/kkt重置额度；"
-        "/kkt审核 开|关；帮助：/kkt帮助"
-    )
-    return "\n".join(lines)
+    """User-facing help plain text（含常用别名）。"""
+    return build_user_help_plain(command_groups)
 
 
 def build_workflow_help_text(
     command_groups: dict[str, dict[str, object]] | None = None,
 ) -> str:
-    """Grok 工作流说明（帮助合并转发第三节点）。"""
+    """Workflow-only plain block（兼容旧调用）。"""
     groups = command_groups or _default_help_groups()
-
-    def names(key: str, fallback: list[str]) -> list[str]:
-        item = groups.get(key) or {}
-        found = [str(name) for name in item.get("names", [])]
-        return found or fallback
-
-    pack = _format_command_names(names("grokpack", ["grokpack", "gkpack", "gkp"]))
-    vg = _format_command_names(names("grokvg", ["grokvg", "gkvg", "gvg"]))
+    pack = _help_group_names(groups, "grokpack", ["grokpack", "gkp"])
+    vg = _help_group_names(groups, "grokvg", ["grokvg", "gvg"])
     return (
-        "康康图 · Grok 工作流\n"
-        f"全套（图→视频→GIF）：{pack} <视频意图提示词>\n"
-        f"  压缩成品：/grokpackz 或 /gkpz1-5（取图逻辑同 /grok）\n"
-        f"  生图会按「视频首帧」构图，用户词是视频内容不是普通插画\n"
-        f"视频套（视频→GIF）：{vg} <提示词>\n"
-        f"  压缩成品：/grokvgz 或 /gvgz1-5（取图逻辑同 /grokvideo）\n"
-        "发送形态（共两条，少刷屏）：\n"
-        "  ① 合并转发：过程提示（猫娘）+ 过程产物\n"
-        "  ② 单独一条：最终 GIF 成品\n"
-        "全套扣图+视频额度；视频套只扣视频；GIF 本地不扣模型额度。"
+        "【工作流】\n"
+        f"{_help_cmd_line(pack, '图→视频→GIF')}\n"
+        "/grokpackz · /gkpz1-5  压缩成品\n"
+        f"{_help_cmd_line(vg, '视频→GIF')}\n"
+        "/grokvgz · /gvgz1-5  压缩成品"
     )
 
 
 def build_alias_help_text(
     command_groups: dict[str, dict[str, object]] | None = None,
 ) -> str:
-    """Build the alias-only help section for the second forward node."""
+    """常用别名速查（不含管理/帮助同义词洪流）。"""
     groups = command_groups or _default_help_groups()
-    lines = ["康康图 · 当前别名"]
-    for key in (
-        "main",
-        "image2",
-        "grok",
-        "grok2",
-        "video",
-        "main_gif",
-        "main_gif2",
-        "image2_gif",
-        "image2_gif2",
-        "kkgifzip",
-        "grokpack",
-        "grokvg",
-        "admin_quota",
-        "admin_reset",
-        "admin_moderation",
-        "help",
+    lines = ["【常用别名】"]
+    for key, fallback in (
+        ("main", ["hajimi", "kkt"]),
+        ("grok", ["grok", "gk"]),
+        ("grok2", ["grok2", "grok2k", "gk2"]),
+        ("image2", ["image2"]),
+        ("video", ["grokvideo", "grokv", "gkv", "gv"]),
+        ("main_gif", ["hajimigif", "kktgif"]),
+        ("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
+        ("grokpack", ["grokpack", "gkpack", "gkp"]),
+        ("grokvg", ["grokvg", "gkvg", "gvg"]),
     ):
-        item = groups.get(key) or {}
-        names = [str(name) for name in item.get("names", [])]
+        names = _help_group_names(groups, key, fallback)
         if not names:
             continue
-        primary = f"/{names[0]}"
-        aliases = " ".join(f"/{name}" for name in names[1:]) or "（无）"
-        lines.append(f"{item.get('label') or key} {primary}：{aliases}")
-    lines.append("视频别名均支持 /别名5 这种紧凑时长写法（1-15 秒）。")
-    lines.append("GIF 压缩别名均支持 /别名3 这种档位写法（1-5）。")
-    lines.append("工作流 z 别名均支持 /别名3 压缩档（1-5）。")
+        aliases = _help_short_aliases(names, max_n=5)
+        if not aliases:
+            lines.append(f"/{names[0]}")
+        else:
+            lines.append(
+                f"/{names[0]} → " + " ".join(f"/{a}" for a in aliases)
+            )
+    lines.append("视频：/别名5 = 秒数；压缩/工作流 z：/别名3 = 档位")
     return "\n".join(lines)
 
 
 def build_help_text(command_groups: dict[str, dict[str, object]] | None = None) -> str:
-    """Backward-compatible short help text; aliases are sent separately."""
-    return build_basic_help_text(command_groups)
+    """Full plain help (T2I 失败时的完整回退)。"""
+    return build_user_help_plain(command_groups)
 
 
 def build_gif_help_text(command_groups: dict[str, dict[str, object]] | None = None) -> str:
@@ -358,7 +477,7 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.19.0",
+    "0.19.1",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -4049,44 +4168,61 @@ class KktImagePlugin(Star, KktWebApiMixin):
 
     @filter.command("kkt帮助", alias=_DEFAULT_HELP_ALIASES)
     async def handle_help(self, event: AstrMessageEvent):
-        """查看康康图全部主指令、GIF 指令、工作流和当前生效别名。"""
+        """帮助卡：优先 T2I 图片，失败回退精简纯文本。"""
         event.stop_event()
         groups = self._command_help_groups()
-        basic_text = build_basic_help_text(groups)
-        alias_text = build_alias_help_text(groups)
-        workflow_text = build_workflow_help_text(groups)
+        md_text = build_user_help_markdown(groups)
+        plain_text = build_user_help_plain(groups)
+        # 1) 本地 T2I（不依赖全局 t2i 开关）
+        image_path = await self._render_help_t2i(md_text)
+        if image_path:
+            try:
+                try:
+                    image = Comp.Image.fromFileSystem(str(Path(image_path).resolve()))
+                except Exception:
+                    image = Comp.Image(
+                        file=str(Path(image_path).resolve()), path=image_path
+                    )
+                await event.send(MessageChain([image]))
+                self._schedule_cleanup(image_path)
+                return
+            except Exception as exc:
+                logger.warning("[kkt] 帮助图发送失败，回退文本: %s", exc)
+        # 2) 纯文本（结构与图一致）
+        yield event.plain_result(plain_text)
+
+    async def _render_help_t2i(self, markdown_text: str) -> str | None:
+        """Render help markdown to a local image path; None on failure."""
         try:
-            self_id = str(event.get_self_id() or "0")
-            await event.send(
-                MessageChain(
-                    [
-                        Comp.Nodes(
-                            [
-                                Comp.Node(
-                                    content=[Comp.Plain(basic_text)],
-                                    name="康康图",
-                                    uin=self_id,
-                                ),
-                                Comp.Node(
-                                    content=[Comp.Plain(alias_text)],
-                                    name="康康图·别名",
-                                    uin=self_id,
-                                ),
-                                Comp.Node(
-                                    content=[Comp.Plain(workflow_text)],
-                                    name="康康图·工作流",
-                                    uin=self_id,
-                                ),
-                            ]
-                        )
-                    ]
-                )
-            )
+            from astrbot.api import html_renderer
         except Exception as exc:
-            logger.warning("[kkt] 帮助合并转发发送失败，回退文本: %s", exc)
-            yield event.plain_result(
-                f"{basic_text}\n\n{alias_text}\n\n{workflow_text}"
+            logger.debug("[kkt] html_renderer 不可用: %s", exc)
+            return None
+        try:
+            path = await html_renderer.render_t2i(
+                markdown_text,
+                use_network=False,
+                return_url=False,
+                template_name="base",
             )
+            if path and Path(str(path)).is_file():
+                logger.info("[kkt] 帮助 T2I 成功: path=%s", path)
+                return str(path)
+        except Exception as exc:
+            logger.warning("[kkt] 本地 T2I 失败，尝试远端: %s", exc)
+        try:
+            path = await html_renderer.render_t2i(
+                markdown_text,
+                use_network=True,
+                return_url=False,
+                template_name="base",
+            )
+            if path and Path(str(path)).is_file():
+                logger.info("[kkt] 帮助 T2I 远端成功: path=%s", path)
+                return str(path)
+        except Exception as exc:
+            logger.warning("[kkt] 帮助 T2I 失败: %s", exc)
+        return None
 
     @filter.command(
         "grokvideo",

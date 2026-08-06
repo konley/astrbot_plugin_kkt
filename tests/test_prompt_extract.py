@@ -421,15 +421,23 @@ def test_build_image_chain_without_quote():
 
 
 def test_build_help_text_is_concise():
-    from main import build_help_text
+    from main import build_help_text, build_user_help_markdown, build_alias_help_text
 
     help_text = build_help_text()
     assert "康康图" in help_text
     assert "/hajimi" in help_text
-    assert "image2" in help_text
+    assert "/image2" in help_text
     assert "调整日限额" not in help_text
-    assert len(help_text.splitlines()) <= 10
+    assert "猫娘" not in help_text
+    assert "不扣模型" not in help_text
     assert "/grokpack" in help_text
+    assert "不扣" not in help_text
+    md = build_user_help_markdown()
+    assert md.startswith("# 康康图")
+    assert "/gk" in md and "/gifz" in md
+    aliases = build_alias_help_text()
+    assert "kktquota" not in aliases
+    assert "hajimi额度" not in aliases
 
 
 def test_command_aliases_keep_defaults_and_skip_collisions():
@@ -492,7 +500,7 @@ def test_grokvideo_canonical_duration_parser():
     assert (duration, body, error) == (5, "一只猫跳舞", None)
 
 
-def test_help_handler_sends_two_forward_nodes():
+def test_help_handler_falls_back_to_plain_when_t2i_missing():
     import asyncio
 
     class HelpEvent:
@@ -516,24 +524,24 @@ def test_help_handler_sends_two_forward_nodes():
     plugin._command_aliases = Plugin._load_command_aliases(
         {"main_command_aliases": ["paint"]}
     )
+
+    async def no_t2i(_md):
+        return None
+
+    plugin._render_help_t2i = no_t2i  # type: ignore[method-assign]
     event = HelpEvent()
 
     async def run():
-        yielded = [item async for item in plugin.handle_help(event)]
-        return yielded
+        return [item async for item in plugin.handle_help(event)]
 
     yielded = asyncio.run(run())
-    assert yielded == []
     assert event.stopped is True
-    assert len(event.sent) == 1
-    nodes = event.sent[0].chain[0]
-    assert isinstance(nodes, Comp.Nodes)
-    assert len(nodes.nodes) == 3
-    assert "基础操作" in nodes.nodes[0].content[0].text
-    assert "当前别名" in nodes.nodes[1].content[0].text
-    assert "/paint" in nodes.nodes[1].content[0].text
-    assert "工作流" in nodes.nodes[2].content[0].text
-    assert "/grokpack" in nodes.nodes[2].content[0].text
+    assert len(yielded) == 1
+    assert "康康图" in yielded[0]
+    assert "/hajimi" in yielded[0]
+    assert "/paint" in yielded[0] or "/kkt" in yielded[0]
+    assert "/grokpack" in yielded[0]
+    assert "猫娘" not in yielded[0]
 
 
 def test_format_image2_multi_ref_reject_includes_count_and_labels():
