@@ -68,6 +68,12 @@
         "type": "list",
         "default": [],
         "hint": "主指令为 /image2gif2；可填写多个别名。"
+      },
+      "kkgifzip_aliases": {
+        "description": "GIF 压缩别名",
+        "type": "list",
+        "default": ["gifz", "gifzip"],
+        "hint": "主指令固定为 /kkgifzip；默认 gifz、gifzip。每个别名也支持末尾 1-5 档，如 /gifz3。"
       }
     }
   },

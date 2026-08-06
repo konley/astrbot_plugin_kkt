@@ -50,6 +50,7 @@ _COMMAND_CANONICALS = {
     "main_gif2": "hajimigif2",
     "image2_gif": "image2gif",
     "image2_gif2": "image2gif2",
+    "kkgifzip": "kkgifzip",
 }
 
 _DEFAULT_COMMAND_ALIASES = {
@@ -62,6 +63,7 @@ _DEFAULT_COMMAND_ALIASES = {
     "main_gif2": [],
     "image2_gif": [],
     "image2_gif2": [],
+    "kkgifzip": ["gifz", "gifzip"],
 }
 
 _DEFAULT_HELP_ALIASES = {
@@ -219,7 +221,7 @@ def build_basic_help_text(
     lines.append(
         "GIF 分镜：/hajimigif（16帧） /hajimigif2（9帧） "
         "/image2gif（16帧） /image2gif2（9帧）；视频转 GIF：/kkgif；"
-        "压 GIF：/kkgifzip1-5"
+        "压 GIF：/kkgifzip|/gifz 1-5"
     )
     lines.append(
         "管理：/kkt额度 [main|image2|video] [数量]；/kkt重置额度；"
@@ -244,6 +246,7 @@ def build_alias_help_text(
         "main_gif2",
         "image2_gif",
         "image2_gif2",
+        "kkgifzip",
         "admin_quota",
         "admin_reset",
         "admin_moderation",
@@ -257,6 +260,7 @@ def build_alias_help_text(
         aliases = " ".join(f"/{name}" for name in names[1:]) or "（无）"
         lines.append(f"{item.get('label') or key} {primary}：{aliases}")
     lines.append("视频别名均支持 /别名5 这种紧凑时长写法（1-15 秒）。")
+    lines.append("GIF 压缩别名均支持 /别名3 这种档位写法（1-5）。")
     return "\n".join(lines)
 
 
@@ -280,7 +284,7 @@ def build_gif_help_text(command_groups: dict[str, dict[str, object]] | None = No
         f"Image2 16/9 帧：{_format_command_names(names('image2_gif', ['image2gif']))} / "
         f"{_format_command_names(names('image2_gif2', ['image2gif2']))}\n"
         "视频转 GIF：引用或附带一个视频后使用 /kkgif\n"
-        "压缩：/kkgifzip 或 /kkgifzip1-5（视频或 GIF；数字越大压得越狠；静态图不支持）\n"
+        "压缩：/kkgifzip|/gifz|/gifzip 或带档位 1-5（视频或 GIF；静态图不支持）\n"
         "每个分镜指令都支持提示词；无提示词时由模型选择简单循环动作。"
     )
 
@@ -303,7 +307,7 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.18.3",
+    "0.18.4",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -332,6 +336,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
         "main_gif2": "main_gif2_aliases",
         "image2_gif": "image2_gif_aliases",
         "image2_gif2": "image2_gif2_aliases",
+        "kkgifzip": "kkgifzip_aliases",
     }
     _COMMAND_HANDLER_NAMES: ClassVar[dict[str, str]] = {
         "main": "handle_hajimi",
@@ -343,6 +348,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
         "main_gif2": "handle_hajimigif2",
         "image2_gif": "handle_image2gif",
         "image2_gif2": "handle_image2gif2",
+        "kkgifzip": "handle_kkgifzip",
     }
     _HELP_HANDLER_NAME = "handle_help"
 
@@ -369,58 +375,60 @@ class KktImagePlugin(Star, KktWebApiMixin):
     _SENSITIVE_REJECT_USER_MSG = "内容审核未通过，请修改提示词后重试。"
 
     # 匹配指令名后的参数；支持 /kkt帮助、/image2 help 等
+    # kkgifzip/gifz/gifzip 及其 1-5 档写在前，避免被更短 token 抢匹配
     _CMD_ARG_RE = re.compile(
-        r"^/?(?:kkgifzip[1-5]?|kkgif|grokvideo\d+|grokv\d+|gkv\d+|gv\d+|grokvideo|grokv|gkv|gv|grok2k|gk2k|gk2|grok2|grok|gk|image2gif2|image2gif|hajimigif2|hajimigif|kktgif|hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
+        r"^/?(?:kkgifzip[1-5]?|gifzip[1-5]?|gifz[1-5]?|kkgif|grokvideo\d+|grokv\d+|gkv\d+|gv\d+|grokvideo|grokv|gkv|gv|grok2k|gk2k|gk2|grok2|grok|gk|image2gif2|image2gif|hajimigif2|hajimigif|kktgif|hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
         re.IGNORECASE | re.DOTALL,
     )
-    # /kkgifzip 五档：固定 ~10fps；1 档≈旧 2 档压感，色数整体抬高
+    # /kkgifzip 五档：固定 ~10fps；减 blur + 提饱和，降低发灰
     # crush：先缩到 dim/crush 再用 neighbor 放大；blur：gblur sigma
     _KKGIFZIP_PRESETS: ClassVar[dict[int, dict[str, float | int | str]]] = {
         1: {
             "dimension": 220,
             "fps": 10,
-            "colors": 160,
+            "colors": 192,
             "crush": 2.0,
-            "blur": 0.4,
+            "blur": 0.15,
+            "saturation": 1.2,
             "dither": "bayer:bayer_scale=2",
         },
         2: {
             "dimension": 180,
             "fps": 10,
-            "colors": 128,
+            "colors": 160,
             "crush": 2.4,
-            "blur": 0.55,
-            "dither": "bayer:bayer_scale=3",
+            "blur": 0.25,
+            "saturation": 1.25,
+            "dither": "bayer:bayer_scale=2",
         },
         3: {
             "dimension": 150,
             "fps": 10,
-            "colors": 96,
+            "colors": 128,
             "crush": 2.8,
-            "blur": 0.7,
+            "blur": 0.35,
+            "saturation": 1.3,
             "dither": "bayer:bayer_scale=3",
         },
         4: {
             "dimension": 120,
             "fps": 10,
-            "colors": 72,
+            "colors": 96,
             "crush": 3.2,
-            "blur": 0.85,
+            "blur": 0.45,
+            "saturation": 1.35,
             "dither": "none",
         },
         5: {
             "dimension": 100,
             "fps": 10,
-            "colors": 56,
+            "colors": 72,
             "crush": 3.8,
-            "blur": 1.0,
+            "blur": 0.55,
+            "saturation": 1.4,
             "dither": "none",
         },
     }
-    _KKGIFZIP_LEVEL_RE = re.compile(
-        r"^/?kkgifzip([1-5])?(?:帮助|help|\?)?$",
-        re.IGNORECASE,
-    )
     # AstrBot 把 At 序列化成 @昵称 或 @昵称(QQ号) 时用于剔除
     _AT_TOKEN_RE = re.compile(
         r"@[\w\u4e00-\u9fff\-·.]+(?:\(\d+\))?",
@@ -811,14 +819,19 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 for name in names:
                     for duration in range(100):
                         mapping[f"{name}{duration}".casefold()] = key
+            if key == "kkgifzip":
+                for name in names:
+                    for level in range(1, 6):
+                        mapping[f"{name}{level}".casefold()] = key
         mapping["kkgif"] = "kkgif"
-        mapping["kkgifzip"] = "kkgifzip"
-        for level in range(1, 6):
-            mapping[f"kkgifzip{level}"] = "kkgifzip"
         return mapping
 
     def _command_names_for_key(
-        self, key: str, *, include_duration_aliases: bool = False
+        self,
+        key: str,
+        *,
+        include_duration_aliases: bool = False,
+        include_level_aliases: bool = False,
     ) -> list[str]:
         canonical = self._COMMAND_CANONICALS[key]
         names = [canonical, *self._command_aliases.get(key, [])]
@@ -828,17 +841,27 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 for name in names[:]
                 for duration in range(100)
             )
+        if include_level_aliases and key == "kkgifzip":
+            names.extend(
+                f"{name}{level}"
+                for name in names[:]
+                for level in range(1, 6)
+            )
         return list(dict.fromkeys(names))
 
-    def _kkgifzip_command_names(self) -> list[str]:
-        return ["kkgifzip", *[f"kkgifzip{level}" for level in range(1, 6)]]
+    def _kkgifzip_command_names(self, *, include_levels: bool = True) -> list[str]:
+        return self._command_names_for_key(
+            "kkgifzip", include_level_aliases=include_levels
+        )
 
     def _command_names_for_parser(self) -> list[str]:
-        names: list[str] = ["kkgif", *self._kkgifzip_command_names()]
+        names: list[str] = ["kkgif"]
         for key in self._COMMAND_CANONICALS:
             names.extend(
                 self._command_names_for_key(
-                    key, include_duration_aliases=key == "video"
+                    key,
+                    include_duration_aliases=key == "video",
+                    include_level_aliases=key == "kkgifzip",
                 )
             )
         return list(dict.fromkeys(names))
@@ -886,6 +909,11 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 "label": "Image2 9 帧分镜",
                 "names": self._command_names_for_key("image2_gif2"),
             },
+            "kkgifzip": {
+                "label": "GIF 压缩",
+                "names": self._command_names_for_key("kkgifzip"),
+                "description": "本地压缩视频或 GIF；支持 1-5 档。",
+            },
             "admin_quota": {
                 "label": "额度",
                 "names": _DEFAULT_ADMIN_COMMAND_NAMES["quota"],
@@ -921,6 +949,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             "main_gif2": "主通道生成 3x3、9 帧 GIF 分镜。",
             "image2_gif": "Image2 通道生成 4x4、16 帧 GIF 分镜。",
             "image2_gif2": "Image2 通道生成 3x3、9 帧 GIF 分镜。",
+            "kkgifzip": "本地压缩视频或 GIF 为更小动图；支持 1-5 档。",
             "admin_quota": "管理员查询或设置三条通道日配额。",
             "admin_reset": "管理员清零今日已用次数，累计次数保留。",
             "admin_moderation": "查询或切换本地敏感词审核。",
@@ -947,15 +976,6 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 "aliases": [],
                 "names": ["kkgif"],
                 "description": "把一个附带或引用的视频在本地转换为 GIF。",
-            }
-        )
-        catalog.append(
-            {
-                "key": "kkgifzip",
-                "primary": "kkgifzip",
-                "aliases": [f"kkgifzip{level}" for level in range(1, 6)],
-                "names": self._kkgifzip_command_names(),
-                "description": "五档压缩视频/GIF 为表情包风；静态图不支持。",
             }
         )
         return catalog
@@ -989,7 +1009,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 continue
             canonical = self._COMMAND_CANONICALS[key]
             aliases = self._command_names_for_key(
-                key, include_duration_aliases=key == "video"
+                key,
+                include_duration_aliases=key == "video",
+                include_level_aliases=key == "kkgifzip",
             )[1:]
             for event_filter in getattr(metadata, "event_filters", []):
                 if not isinstance(event_filter, CommandFilter):
@@ -2789,8 +2811,6 @@ class KktImagePlugin(Star, KktWebApiMixin):
             key = mapping.get(normalized)
             if key == "kkgif":
                 return "kkgif"
-            if key == "kkgifzip":
-                return "kkgifzip"
             if key:
                 return self._COMMAND_CANONICALS[key]
 
@@ -2800,6 +2820,15 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     suffix = normalized[len(name) :]
                     if suffix.isdigit():
                         return self._COMMAND_CANONICALS["video"]
+            # 兼容自定义 kkgifzip 别名 + 档位：/gifz3
+            for name in self._command_names_for_key("kkgifzip"):
+                folded = name.casefold()
+                if normalized == folded:
+                    return "kkgifzip"
+                if normalized.startswith(folded):
+                    suffix = normalized[len(folded) :]
+                    if suffix.isdigit() and 1 <= int(suffix) <= 5:
+                        return "kkgifzip"
             return None
 
         raw = (event.get_message_str() or "").strip()
@@ -2873,7 +2902,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             yield event.plain_result(
                 "康康视频转 GIF\n用法：引用或附带一个视频后发送 /kkgif\n"
                 "限制：仅支持一个视频，最长 16 秒，输出不含声音。\n"
-                "表情包压缩请用 /kkgifzip 或 /kkgifzip1-5。"
+                "压缩请用 /kkgifzip 或 /gifz（可带 1-5 档）。"
             )
             return
 
@@ -2944,10 +2973,28 @@ class KktImagePlugin(Star, KktWebApiMixin):
 
     @filter.command(
         "kkgifzip",
-        alias={"kkgifzip1", "kkgifzip2", "kkgifzip3", "kkgifzip4", "kkgifzip5"},
+        alias={
+            "gifz",
+            "gifzip",
+            "kkgifzip1",
+            "kkgifzip2",
+            "kkgifzip3",
+            "kkgifzip4",
+            "kkgifzip5",
+            "gifz1",
+            "gifz2",
+            "gifz3",
+            "gifz4",
+            "gifz5",
+            "gifzip1",
+            "gifzip2",
+            "gifzip3",
+            "gifzip4",
+            "gifzip5",
+        },
     )
     async def handle_kkgifzip(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
-        """五档压缩视频或 GIF 为表情包风；静态图不支持。"""
+        """五档压缩视频或 GIF；静态图不支持。"""
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             logger.debug("[kkt] kkgifzip 忽略黑名单群: group_id=%s", group_id)
@@ -3081,27 +3128,47 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     pass
 
     def _parse_kkgifzip_level(self, event: AstrMessageEvent) -> int:
-        """从消息指令解析档位：/kkgifzip → 1，/kkgifzip2 → 2 … /kkgifzip5 → 5。"""
+        """从消息指令解析档位：/kkgifzip|/gifz → 1，/gifz3 → 3。"""
         raw = (event.get_message_str() or "").strip()
-        first = raw.split()[0] if raw.split() else ""
-        match = self._KKGIFZIP_LEVEL_RE.match(first.lstrip("/"))
-        if not match:
-            plain = "".join(
-                getattr(c, "text", "") or ""
-                for c in event.get_messages()
-                if isinstance(c, Comp.Plain)
-            ).strip()
-            token = plain.split()[0] if plain.split() else ""
-            match = self._KKGIFZIP_LEVEL_RE.match(token.lstrip("/"))
-        if match and match.group(1):
-            return max(1, min(5, int(match.group(1))))
+        first = raw.split()[0].lstrip("/") if raw.split() else ""
+        plain = "".join(
+            getattr(c, "text", "") or ""
+            for c in event.get_messages()
+            if isinstance(c, Comp.Plain)
+        ).strip()
+        token = plain.split()[0].lstrip("/") if plain.split() else first
+        for candidate in (first, token):
+            if not candidate:
+                continue
+            normalized = candidate.casefold()
+            # 去掉末尾帮助后缀
+            for suffix in ("帮助", "help", "?"):
+                if normalized.endswith(suffix):
+                    normalized = normalized[: -len(suffix)]
+            for name in sorted(
+                self._command_names_for_key("kkgifzip"),
+                key=len,
+                reverse=True,
+            ):
+                folded = name.casefold()
+                if normalized == folded:
+                    return 1
+                if normalized.startswith(folded):
+                    rest = normalized[len(folded) :]
+                    if rest.isdigit() and 1 <= int(rest) <= 5:
+                        return int(rest)
         return 1
 
     def _kkgifzip_help_text(self) -> str:
+        names = self._command_names_for_key("kkgifzip")
+        primary = f"/{names[0]}" if names else "/kkgifzip"
+        extras = " ".join(f"/{n}" for n in names[1:3]) if len(names) > 1 else ""
         return (
             "GIF 压缩\n"
-            "用法：引用/附带视频或 GIF 后发 /kkgifzip 或 /kkgifzip1-5\n"
-            "裸指令 = 1 档；数字越大压得越狠。不支持静态图。\n"
+            f"用法：引用/附带视频或 GIF 后发 {primary}"
+            + (f" 或 {extras}" if extras else "")
+            + "\n"
+            "裸指令 = 1 档；也可写 /指令3（1-5）。不支持静态图。\n"
             "视频最长 16 秒。"
         )
 
@@ -3344,10 +3411,12 @@ class KktImagePlugin(Star, KktWebApiMixin):
         crush: float,
         blur: float,
         dither: str,
+        saturation: float = 1.2,
     ) -> str:
-        """Build meme/JPG-like GIF filters: soft scale → pixel crush → blur → palette."""
+        """Build GIF filters: scale → crush → light blur → saturation → palette."""
         crush = max(1.0, float(crush))
         blur = max(0.0, float(blur))
+        saturation = max(0.8, min(1.8, float(saturation)))
         # 最长边限制到 dimension，始终保持原比例；crush 只做等比缩小再放大，不拉方
         chain = (
             f"[0:v]fps={fps},"
@@ -3361,10 +3430,13 @@ class KktImagePlugin(Star, KktWebApiMixin):
             )
         if blur > 0.05:
             chain += f",gblur=sigma={blur}"
-        # stats_mode=single：整段共用一盘调色板，色带更硬；dither=none 更像劣质 JPG 色块
+        # 提一点饱和度 + 对比，抵消 crush/模糊带来的发灰
+        if abs(saturation - 1.0) > 0.02:
+            chain += f",eq=saturation={saturation}:contrast=1.05"
+        # stats_mode=diff：按帧差选色，比 single 少脏中间灰
         chain += (
             f",split[a][b];"
-            f"[a]palettegen=max_colors={colors}:stats_mode=single[p];"
+            f"[a]palettegen=max_colors={colors}:stats_mode=diff[p];"
             f"[b][p]paletteuse=dither={dither}"
         )
         return chain
@@ -3384,6 +3456,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
         base_colors = int(preset["colors"])
         base_crush = float(preset["crush"])
         base_blur = float(preset["blur"])
+        base_saturation = float(preset.get("saturation", 1.2))
         base_dither = str(preset["dither"])
 
         if source_kind == "video":
@@ -3402,17 +3475,20 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 duration = time_limit
 
         # 超限时只再砍分辨率/色数/加强 crush，不降 fps（避免变卡）
-        attempts: list[tuple[int, int, int, float, float, str]] = []
+        attempts: list[tuple[int, int, int, float, float, float, str]] = []
         for step in range(3):
             dimension = max(72, base_dimension - step * 36)
-            colors = max(16, base_colors - step * 12)
+            colors = max(32, base_colors - step * 16)
             crush = min(6.0, base_crush + step * 0.6)
-            blur = min(2.0, base_blur + step * 0.15)
+            blur = min(1.2, base_blur + step * 0.1)
+            saturation = min(1.6, base_saturation + step * 0.05)
             dither = base_dither if step == 0 else "none"
-            attempts.append((dimension, base_fps, colors, crush, blur, dither))
+            attempts.append(
+                (dimension, base_fps, colors, crush, blur, saturation, dither)
+            )
 
         last_error = "未知错误"
-        for dimension, fps, colors, crush, blur, dither in attempts:
+        for dimension, fps, colors, crush, blur, saturation, dither in attempts:
             stamp = int(time.time() * 1000)
             output_path = (
                 self.temp_dir / f"kkt_gifzip_{stamp}_l{level}_{dimension}.gif"
@@ -3424,6 +3500,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 crush=crush,
                 blur=blur,
                 dither=dither,
+                saturation=saturation,
             )
             command = [
                 "ffmpeg",

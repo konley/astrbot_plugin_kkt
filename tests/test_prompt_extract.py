@@ -225,6 +225,8 @@ def test_cmd_arg_regex_basic():
     assert Plugin._command_arg_from_text("/kkgif") == ""
     assert Plugin._command_arg_from_text("/kkgifzip") == ""
     assert Plugin._command_arg_from_text("/kkgifzip3") == ""
+    assert Plugin._command_arg_from_text("/gifz") == ""
+    assert Plugin._command_arg_from_text("/gifzip3") == ""
     assert Plugin._command_arg_from_text("/kkgifzip5 帮助") == "帮助"
     assert Plugin._command_arg_from_text("kkt 一只猫") == "一只猫"
     assert Plugin._command_arg_from_text("/kkt帮助") == ""
@@ -1111,10 +1113,14 @@ def test_make_gif_from_grid_rejects_low_resolution(tmp_path):
 
 def test_kkgifzip_level_parser_and_presets():
     plugin = object.__new__(Plugin)
+    plugin._command_aliases = Plugin._load_command_aliases({})
     assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip")) == 1
     assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip1")) == 1
     assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip3 帮助")) == 3
     assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip5")) == 5
+    assert plugin._parse_kkgifzip_level(FakeEvent([], "/gifz")) == 1
+    assert plugin._parse_kkgifzip_level(FakeEvent([], "/gifz3")) == 3
+    assert plugin._parse_kkgifzip_level(FakeEvent([], "/gifzip5")) == 5
     assert set(Plugin._KKGIFZIP_PRESETS) == {1, 2, 3, 4, 5}
     assert Plugin._KKGIFZIP_PRESETS[1]["dimension"] > Plugin._KKGIFZIP_PRESETS[5]["dimension"]
     # 全档固定约 10fps，不靠降帧变糊
@@ -1129,24 +1135,29 @@ def test_kkgifzip_level_parser_and_presets():
         crush=2.5,
         blur=0.75,
         dither="none",
+        saturation=1.3,
     )
     assert "flags=neighbor" in graph and "gblur=sigma=0.75" in graph
+    assert "eq=saturation=1.3" in graph and "stats_mode=diff" in graph
     assert "force_original_aspect_ratio=decrease" in graph
     assert "scale=iw*2.5:ih*2.5" in graph
     assert "scale=180:180:flags=neighbor" not in graph
     assert "palettegen=max_colors=48" in graph and "dither=none" in graph
-    help_text = Plugin._kkgifzip_help_text(plugin)
-    assert "/kkgifzip1-5" in help_text and "静态" in help_text
-    assert int(Plugin._KKGIFZIP_PRESETS[1]["colors"]) >= 128
+    help_text = plugin._kkgifzip_help_text()
+    assert "/kkgifzip" in help_text and "静态" in help_text
+    assert int(Plugin._KKGIFZIP_PRESETS[1]["colors"]) >= 160
     assert int(Plugin._KKGIFZIP_PRESETS[1]["dimension"]) == 220
 
 
 def test_kkgifzip_command_names_in_parser_and_catalog():
     plugin = object.__new__(Plugin)
     plugin._command_aliases = Plugin._load_command_aliases({})
-    plugin._command_alias_map = Plugin._build_command_alias_map(plugin)
+    plugin._command_alias_map = plugin._build_command_alias_map()
     names = plugin._command_names_for_parser()
     assert "kkgifzip" in names and "kkgifzip5" in names
+    assert "gifz" in names and "gifzip3" in names
     catalog = plugin._command_catalog()
     keys = {item["key"] for item in catalog}
     assert "kkgifzip" in keys
+    aliases = Plugin._load_command_aliases({})
+    assert "gifz" in aliases["kkgifzip"] and "gifzip" in aliases["kkgifzip"]
