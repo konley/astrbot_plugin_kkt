@@ -247,7 +247,9 @@ def _help_is_noise_alias(name: str) -> bool:
     return any(token in n for token in noise)
 
 
-def _help_short_aliases(names: list[str], *, max_n: int = 5) -> list[str]:
+def _help_short_aliases(
+    names: list[str], *, max_n: int = 5, skip_z_bases: bool = False
+) -> list[str]:
     """Up to max_n short daily-use aliases (skip primary)."""
     if not names:
         return []
@@ -255,25 +257,33 @@ def _help_short_aliases(names: list[str], *, max_n: int = 5) -> list[str]:
     for name in names[1:]:
         if _help_is_noise_alias(name):
             continue
-        # 跳过纯时长数字后缀（grokv5）；保留 zip 档位基名由文案说明
+        folded = name.casefold()
+        # 跳过时长/档位数字展开（grokv5、gkpz3）
         if re.fullmatch(r".+\d+", name):
-            base = re.sub(r"\d+$", "", name)
-            if base.casefold() not in {n.casefold() for n in names[:6]}:
+            continue
+        # 工作流主行不列 z 基名（另有压缩行）
+        if skip_z_bases and (folded.endswith("z") or folded.endswith("zip")):
+            if folded not in {"gifz", "gifzip", "kkgifzip"}:
                 continue
-            if not (base.casefold().endswith("z") or "zip" in base.casefold()):
-                continue
-        # 工作流 z 基名已在单独行写 gkpz1-5，列表里可留 gkpz 本身
         out.append(name)
         if len(out) >= max_n:
             break
     return out
 
 
-def _help_cmd_line(names: list[str], desc: str, *, max_alias: int = 5) -> str:
+def _help_cmd_line(
+    names: list[str],
+    desc: str,
+    *,
+    max_alias: int = 5,
+    skip_z_bases: bool = False,
+) -> str:
     if not names:
         return ""
     primary = f"/{names[0]}"
-    aliases = _help_short_aliases(names, max_n=max_alias)
+    aliases = _help_short_aliases(
+        names, max_n=max_alias, skip_z_bases=skip_z_bases
+    )
     if aliases:
         alias_part = " · ".join(f"/{a}" for a in aliases)
         return f"{primary} · {alias_part}  {desc}"
@@ -315,11 +325,13 @@ def build_user_help_markdown(
         _help_cmd_line(
             g("grokpack", ["grokpack", "gkpack", "gkp"]),
             "图 → 视频 → GIF",
+            skip_z_bases=True,
         ),
         "/grokpackz · /gkpz1-5  同上，成品压缩",
         _help_cmd_line(
             g("grokvg", ["grokvg", "gkvg", "gvg"]),
             "视频 → GIF",
+            skip_z_bases=True,
         ),
         "/grokvgz · /gvgz1-5  同上，成品压缩",
         "",
@@ -367,11 +379,13 @@ def build_user_help_plain(
         _help_cmd_line(
             g("grokpack", ["grokpack", "gkpack", "gkp"]),
             "图→视频→GIF",
+            skip_z_bases=True,
         ),
         "/grokpackz · /gkpz1-5  压缩成品",
         _help_cmd_line(
             g("grokvg", ["grokvg", "gkvg", "gvg"]),
             "视频→GIF",
+            skip_z_bases=True,
         ),
         "/grokvgz · /gvgz1-5  压缩成品",
         "",
