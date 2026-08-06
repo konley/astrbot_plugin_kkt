@@ -303,7 +303,7 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.18.2",
+    "0.18.3",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -3348,16 +3348,16 @@ class KktImagePlugin(Star, KktWebApiMixin):
         """Build meme/JPG-like GIF filters: soft scale → pixel crush → blur → palette."""
         crush = max(1.0, float(crush))
         blur = max(0.0, float(blur))
-        # 先 bilinear 缩到目标边长，再按 crush 缩到小图并用 neighbor 放大 → 色块/像素感
-        #（比单纯 lanczos 高清缩放更像糊 JPG / 表情包）
+        # 最长边限制到 dimension，始终保持原比例；crush 只做等比缩小再放大，不拉方
         chain = (
             f"[0:v]fps={fps},"
-            f"scale={dimension}:{dimension}:force_original_aspect_ratio=decrease:flags=bilinear"
+            f"scale='min({dimension},iw)':'min({dimension},ih)'"
+            f":force_original_aspect_ratio=decrease:flags=bilinear"
         )
         if crush > 1.05:
             chain += (
                 f",scale=iw/{crush}:ih/{crush}:flags=bilinear,"
-                f"scale={dimension}:{dimension}:flags=neighbor"
+                f"scale=iw*{crush}:ih*{crush}:flags=neighbor"
             )
         if blur > 0.05:
             chain += f",gblur=sigma={blur}"

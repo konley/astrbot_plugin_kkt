@@ -2,7 +2,7 @@
 
 AstrBot 多通道媒体插件，支持 OpenAI 兼容生图/修图、Grok Images API、Grok 2K 文生图、GIF 分镜，以及 grok2api 异步视频。插件包含 `KKT Studio` WebUI 控制台，用于连接测试、运行状态查看和常用参数管理。
 
-当前版本：`0.18.2`
+当前版本：`0.18.3`
 
 ## 功能总览
 

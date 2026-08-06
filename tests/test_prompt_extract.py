@@ -1131,6 +1131,9 @@ def test_kkgifzip_level_parser_and_presets():
         dither="none",
     )
     assert "flags=neighbor" in graph and "gblur=sigma=0.75" in graph
+    assert "force_original_aspect_ratio=decrease" in graph
+    assert "scale=iw*2.5:ih*2.5" in graph
+    assert "scale=180:180:flags=neighbor" not in graph
     assert "palettegen=max_colors=48" in graph and "dither=none" in graph
     help_text = Plugin._kkgifzip_help_text(plugin)
     assert "/kkgifzip1-5" in help_text and "静态" in help_text
