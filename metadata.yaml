@@ -1,6 +1,6 @@
 name: astrbot_plugin_kkt
 desc: 康康图：多通道生图/修图、Grok 2K、视频转 GIF、多图参考、GIF 分镜与 grok2api 视频，并提供 KKT Studio WebUI 控制台
-version: 0.19.2
+version: 0.20.0
 author: konley
 display_name: 康康图
 repo: https://github.com/konley/astrbot_plugin_kkt

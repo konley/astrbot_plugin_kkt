@@ -2,7 +2,7 @@
 
 AstrBot 多通道媒体插件，支持 OpenAI 兼容生图/修图、Grok Images API、Grok 2K 文生图、GIF 分镜，以及 grok2api 异步视频。插件包含 `KKT Studio` WebUI 控制台，用于连接测试、运行状态查看和常用参数管理。
 
-当前版本：`0.19.2`
+当前版本：`0.20.0`
 
 ## 功能总览
 
@@ -14,7 +14,7 @@ AstrBot 多通道媒体插件，支持 OpenAI 兼容生图/修图、Grok Images 
 - GIF 分镜：`/hajimigif`、`/kktgif`、`/hajimigif2`、`/image2gif`、`/image2gif2`。
 - `/kkgif`：把当前消息或回复中的一个视频本地转换为 GIF，不调用模型。
 - `/kkgifzip`、`/gifz`、`/gifzip`（可配别名）：五档压缩视频或 GIF（本地 FFmpeg）；静态图不支持。
-- `/grokpack`、`/grokvg`（及 z/1-5）：Grok 工作流；过程合并转发 + 最终 GIF 单独发。
+- 全套工作流（视频固定 Grok）：`/grokpack`（Grok 首帧）、`/hajimipack`（主通道首帧）、`/image2pack`（Image2 首帧）；`/grokvg` 视频+GIF。z/1-5 为压缩成品。
 - 引用消息文字自动合并到提示词，引用图片自动作为参考图。
 - 多图按“引用图 → 当前消息图片 → @头像”顺序收集，并自动去重。
 - GIF/WebP 参考图可在后台选择首帧、中间帧或末帧。
@@ -155,18 +155,21 @@ video_command_aliases = grokv, gkv, gv
 
 `/kkt帮助` 优先用 **pillowmd** 渲染（复用本机 `astrbot_plugin_outputpro/t2i_style` 中文字体样式，不硬依赖该插件进程）；失败再回退 AstrBot 自带 T2I，再失败则纯文本。
 
-### Grok 工作流
+### 工作流（视频 = Grok）
 
 ```text
-/grokpack 一只猫在雨中奔跑挥手
-/gkpz3 一只猫在雨中奔跑
-/grokvg 让主体轻轻点头
-/gvgz5 让主体挥手
+/grokpack 一只猫在雨中挥手          # 首帧 Grok
+/hajimipack 一只猫在雨中挥手        # 首帧 主通道
+/hkp 一只猫在雨中挥手               # 同上
+/image2pack 赛博女孩转头            # 首帧 Image2
+/gkpz3 一只猫在雨中奔跑             # Grok 全套 + 3 档压缩 GIF
+/grokvg 让主体轻轻点头              # 仅视频→GIF
 ```
 
-- 用户提示词是**视频意图**；`/grokpack` 生图会按「视频首帧」构图。
-- 发送共两条：① 合并转发（过程提示 + 过程产物）② 单独一条最终 GIF。
-- `z` / `z1-5`：最终 GIF 走压缩档。
+- 提示词是**视频意图**；全套会先按「视频首帧」构图再出视频。
+- 用不同指令选首帧通道；**视频阶段始终 Grok**。
+- 发送共两条：① 过程合并转发 ② 最终 GIF。
+- `z` / `z1-5`：最终 GIF 压缩档。
 
 ### 普通生图
 

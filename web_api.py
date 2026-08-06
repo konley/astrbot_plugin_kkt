@@ -49,6 +49,8 @@ class KktWebApiMixin:
         "image2_gif2_aliases": ("command_settings", list),
         "kkgifzip_aliases": ("command_settings", list),
         "grokpack_aliases": ("command_settings", list),
+        "hajimipack_aliases": ("command_settings", list),
+        "image2pack_aliases": ("command_settings", list),
         "grokvg_aliases": ("command_settings", list),
         # Channel credentials and models
         "group_blacklist": ("group_settings", list),

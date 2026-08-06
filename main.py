@@ -52,6 +52,8 @@ _COMMAND_CANONICALS = {
     "image2_gif2": "image2gif2",
     "kkgifzip": "kkgifzip",
     "grokpack": "grokpack",
+    "hajimipack": "hajimipack",
+    "image2pack": "image2pack",
     "grokvg": "grokvg",
 }
 
@@ -66,13 +68,29 @@ _DEFAULT_COMMAND_ALIASES = {
     "image2_gif": [],
     "image2_gif2": [],
     "kkgifzip": ["gifz", "gifzip"],
-    # 工作流：全套 / 视频+GIF；z 系别名在 map 里再扩 1-5 档
+    # 全套工作流：前缀选首帧通道；z 系在 map 里再扩 1-5 档
     "grokpack": [
         "gkpack",
         "gkp",
         "grokpackz",
         "gkpackz",
         "gkpz",
+    ],
+    "hajimipack": [
+        "hkpack",
+        "hkp",
+        "kktpack",
+        "hajimipackz",
+        "hkpackz",
+        "hkpz",
+        "kktpackz",
+    ],
+    "image2pack": [
+        "i2pack",
+        "i2p",
+        "image2packz",
+        "i2packz",
+        "i2pz",
     ],
     "grokvg": [
         "gkvg",
@@ -363,28 +381,39 @@ def build_user_help_markdown(
             "压缩视频或 GIF。档位：`/gifz`～`/gifz5`（数字越大越狠）。不支持静态图。",
         ),
         "",
-        "## 三、Grok 工作流（推荐）",
+        "## 三、工作流（视频固定 Grok）",
         "",
-        "提示词按 **视频内容** 来写。全套会先生成「适合当首帧」的图，再出视频，最后出 GIF。",
+        "提示词按 **视频内容** 写。全套先出「首帧图」，再 Grok 视频，最后 GIF。",
+        "用 **不同指令** 选首帧通道：",
         "",
         _help_md_item(
             g("grokpack", ["grokpack", "gkpack", "gkp"]),
-            "全套：图 → 视频 → GIF。取图逻辑同 /grok。",
+            "首帧=Grok → 视频 → GIF",
             skip_z_bases=True,
         ),
-        "- **/grokpackz** · /gkpz · /gkpz1-5  \n  全套 + 最终 GIF 压缩档。",
+        "- **/grokpackz** · /gkpz1-5  \n  同上 + 成品压缩",
+        _help_md_item(
+            g("hajimipack", ["hajimipack", "hkpack", "hkp", "kktpack"]),
+            "首帧=主通道 /hajimi → 视频 → GIF",
+            skip_z_bases=True,
+        ),
+        "- **/hajimipackz** · /hkpz1-5  \n  同上 + 成品压缩",
+        _help_md_item(
+            g("image2pack", ["image2pack", "i2pack", "i2p"]),
+            "首帧=Image2 → 视频 → GIF",
+            skip_z_bases=True,
+        ),
+        "- **/image2packz** · /i2pz1-5  \n  同上 + 成品压缩",
         _help_md_item(
             g("grokvg", ["grokvg", "gkvg", "gvg"]),
-            "视频套：视频 → GIF。取图逻辑同 /grokvideo（最多 1 张首帧）。",
+            "视频套：视频 → GIF（无单独生图步）",
             skip_z_bases=True,
         ),
-        "- **/grokvgz** · /gvgz · /gvgz1-5  \n  视频套 + 最终 GIF 压缩档。",
+        "- **/grokvgz** · /gvgz1-5  \n  视频套 + 成品压缩",
         "",
-        "完成后只有 **两条消息**：",
-        "1. 合并转发：过程说明 + 过程产物（图/视频）",
-        "2. 单独一条：最终 GIF 成品",
+        "完成后 **两条消息**：① 过程合并转发 ② 最终 GIF",
         "",
-        "示例：`/gkp 一只猫在雨中挥手`　`/gkpz3 同上，3 档压缩`",
+        "示例：`/hkp 猫在雨中挥手`　`/gkpz3 …`　`/i2p 赛博女孩转头`",
         "",
         "## 四、管理（管理员）",
         "",
@@ -430,21 +459,31 @@ def build_user_help_plain(
             "压缩视频/GIF；/gifz3=3档",
         ),
         "",
-        "【工作流】提示词=视频意图",
+        "【工作流】提示词=视频意图；视频=Grok",
         _help_cmd_line(
-            g("grokpack", ["grokpack", "gkpack", "gkp"]),
-            "图→视频→GIF",
+            g("grokpack", ["grokpack", "gkp"]),
+            "首帧Grok→视频→GIF",
             skip_z_bases=True,
         ),
-        "/grokpackz · /gkpz1-5  全套+压缩成品",
         _help_cmd_line(
-            g("grokvg", ["grokvg", "gkvg", "gvg"]),
+            g("hajimipack", ["hajimipack", "hkp", "kktpack"]),
+            "首帧主通道→视频→GIF",
+            skip_z_bases=True,
+        ),
+        _help_cmd_line(
+            g("image2pack", ["image2pack", "i2p"]),
+            "首帧Image2→视频→GIF",
+            skip_z_bases=True,
+        ),
+        "/…packz · /…pz1-5  全套+压缩成品",
+        _help_cmd_line(
+            g("grokvg", ["grokvg", "gvg"]),
             "视频→GIF",
             skip_z_bases=True,
         ),
-        "/grokvgz · /gvgz1-5  视频套+压缩成品",
-        "完成：①过程合并转发 ②最终GIF单独发",
-        "例：/gkp 猫在雨中挥手　/gkpz3 …",
+        "/grokvgz · /gvgz1-5  视频套+压缩",
+        "完成：①过程合并转发 ②最终GIF",
+        "例：/hkp 猫挥手　/gkpz3 …　/i2p …",
         "",
         "【管理】/kkt额度  /kkt重置额度  /kkt审核  /kkt帮助",
     ]
@@ -489,6 +528,8 @@ def build_alias_help_text(
         ("main_gif", ["hajimigif", "kktgif"]),
         ("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
         ("grokpack", ["grokpack", "gkpack", "gkp"]),
+        ("hajimipack", ["hajimipack", "hkp", "kktpack"]),
+        ("image2pack", ["image2pack", "i2p"]),
         ("grokvg", ["grokvg", "gkvg", "gvg"]),
     ):
         names = _help_group_names(groups, key, fallback)
@@ -501,7 +542,7 @@ def build_alias_help_text(
             lines.append(
                 f"/{names[0]} → " + " ".join(f"/{a}" for a in aliases)
             )
-    lines.append("视频：/别名5 = 秒数；压缩/工作流 z：/别名3 = 档位")
+    lines.append("压缩/工作流 z：/别名3 = 档位（如 /gkpz3 /hkpz2）")
     return "\n".join(lines)
 
 
@@ -548,7 +589,7 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.19.2",
+    "0.20.0",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -579,6 +620,8 @@ class KktImagePlugin(Star, KktWebApiMixin):
         "image2_gif2": "image2_gif2_aliases",
         "kkgifzip": "kkgifzip_aliases",
         "grokpack": "grokpack_aliases",
+        "hajimipack": "hajimipack_aliases",
+        "image2pack": "image2pack_aliases",
         "grokvg": "grokvg_aliases",
     }
     _COMMAND_HANDLER_NAMES: ClassVar[dict[str, str]] = {
@@ -593,6 +636,8 @@ class KktImagePlugin(Star, KktWebApiMixin):
         "image2_gif2": "handle_image2gif2",
         "kkgifzip": "handle_kkgifzip",
         "grokpack": "handle_grokpack",
+        "hajimipack": "handle_hajimipack",
+        "image2pack": "handle_image2pack",
         "grokvg": "handle_grokvg",
     }
     # 工作流 z 系：名字里带 z 的才扩 1-5 档
@@ -601,11 +646,24 @@ class KktImagePlugin(Star, KktWebApiMixin):
             "grokpackz",
             "gkpackz",
             "gkpz",
+            "hajimipackz",
+            "hkpackz",
+            "hkpz",
+            "kktpackz",
+            "image2packz",
+            "i2packz",
+            "i2pz",
             "grokvgz",
             "gkvgz",
             "gvgz",
         }
     )
+    # 全套工作流：指令族 → 首帧生图通道
+    _WORKFLOW_PACK_STILL: ClassVar[dict[str, str]] = {
+        "grokpack": "grok",
+        "hajimipack": "hajimi",
+        "image2pack": "image2",
+    }
     _HELP_HANDLER_NAME = "handle_help"
 
     # Sensitive-lexicon Vocabulary 文件名 → WebUI 可选类别名
@@ -633,7 +691,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
     # 匹配指令名后的参数；支持 /kkt帮助、/image2 help 等
     # kkgifzip/gifz/gifzip 及其 1-5 档写在前，避免被更短 token 抢匹配
     _CMD_ARG_RE = re.compile(
-        r"^/?(?:grokpackz[1-5]?|gkpackz[1-5]?|gkpz[1-5]?|grokpack|gkpack|gkp|grokvgz[1-5]?|gkvgz[1-5]?|gvgz[1-5]?|grokvg|gkvg|gvg|kkgifzip[1-5]?|gifzip[1-5]?|gifz[1-5]?|kkgif|grokvideo\d+|grokv\d+|gkv\d+|gv\d+|grokvideo|grokv|gkv|gv|grok2k|gk2k|gk2|grok2|grok|gk|image2gif2|image2gif|hajimigif2|hajimigif|kktgif|hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
+        r"^/?(?:image2packz[1-5]?|i2packz[1-5]?|i2pz[1-5]?|image2pack|i2pack|i2p|hajimipackz[1-5]?|hkpackz[1-5]?|hkpz[1-5]?|kktpackz[1-5]?|hajimipack|hkpack|hkp|kktpack|grokpackz[1-5]?|gkpackz[1-5]?|gkpz[1-5]?|grokpack|gkpack|gkp|grokvgz[1-5]?|gkvgz[1-5]?|gvgz[1-5]?|grokvg|gkvg|gvg|kkgifzip[1-5]?|gifzip[1-5]?|gifz[1-5]?|kkgif|grokvideo\d+|grokv\d+|gkv\d+|gv\d+|grokvideo|grokv|gkv|gv|grok2k|gk2k|gk2|grok2|grok|gk|image2gif2|image2gif|hajimigif2|hajimigif|kktgif|hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
         re.IGNORECASE | re.DOTALL,
     )
     # /kkgifzip 五档：固定 ~10fps；减 blur + 提饱和，降低发灰
@@ -828,6 +886,12 @@ class KktImagePlugin(Star, KktWebApiMixin):
         # 轻量本地化：人物默认东亚/华人，画风与生活细节略偏国内习惯（不锁死场景/构图）
         self.prefer_cn_locale = bool(config.get("prefer_cn_locale", True))
         style_parts: list[str] = []
+        # 通用画质软约束：用户说得少时也尽量出清晰好看的图
+        style_parts.append(
+            "【画质默认】主体清晰、构图舒服、光影自然、细节可读；"
+            "避免糊脸、畸形手指、多余肢体、文字乱码、水印与杂乱边框。"
+            "用户描述很短时，可轻微补全合理场景与光影，但不要擅自改写核心主体或风格。"
+        )
         if self.prefer_chinese_text:
             style_parts.append(
                 "【画面文字语言】图中所有可读文字默认使用简体中文，包括但不限于："
@@ -946,7 +1010,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             self.video_api_key, self.video_backup_api_keys
         )
         logger.info(
-            "[kkt] 插件已加载: commands=/hajimi,/image2,/grok,/grok2,/grokvideo,/kkgif,/kkgifzip,/grokpack,/grokvg "
+            "[kkt] 插件已加载: commands=/hajimi,/image2,/grok,/grok2,/grokvideo,/kkgif,/kkgifzip,/grokpack,/hajimipack,/image2pack,/grokvg "
             "blacklist_count=%d model=%s grok_model=%s image2_model=%s image2_key=%s "
             "main_keys=%d grok_keys=%d image2_keys=%d video_keys=%d "
             "endpoint=%s image2_mode=%s image2_size=%s "
@@ -1079,7 +1143,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 for name in names:
                     for level in range(1, 6):
                         mapping[f"{name}{level}".casefold()] = key
-            if key in {"grokpack", "grokvg"}:
+            if key in {"grokpack", "hajimipack", "image2pack", "grokvg"}:
                 for name in names:
                     folded = name.casefold()
                     if folded in self._WORKFLOW_ZIP_BASES or folded.endswith("z"):
@@ -1109,7 +1173,12 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 for name in names[:]
                 for level in range(1, 6)
             )
-        if include_level_aliases and key in {"grokpack", "grokvg"}:
+        if include_level_aliases and key in {
+            "grokpack",
+            "hajimipack",
+            "image2pack",
+            "grokvg",
+        }:
             zip_bases = [
                 name
                 for name in names[:]
@@ -1134,7 +1203,13 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     key,
                     include_duration_aliases=key == "video",
                     include_level_aliases=key
-                    in {"kkgifzip", "grokpack", "grokvg"},
+                    in {
+                        "kkgifzip",
+                        "grokpack",
+                        "hajimipack",
+                        "image2pack",
+                        "grokvg",
+                    },
                 )
             )
         return list(dict.fromkeys(names))
@@ -1188,12 +1263,22 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 "description": "本地压缩视频或 GIF；支持 1-5 档。",
             },
             "grokpack": {
-                "label": "Grok 全套工作流",
+                "label": "全套·Grok 首帧",
                 "names": self._command_names_for_key("grokpack"),
-                "description": "图→视频→GIF；z/1-5 为压缩成品。",
+                "description": "Grok 图→视频→GIF；z/1-5 压缩。",
+            },
+            "hajimipack": {
+                "label": "全套·主通道首帧",
+                "names": self._command_names_for_key("hajimipack"),
+                "description": "hajimi 图→Grok 视频→GIF。",
+            },
+            "image2pack": {
+                "label": "全套·Image2 首帧",
+                "names": self._command_names_for_key("image2pack"),
+                "description": "image2 图→Grok 视频→GIF。",
             },
             "grokvg": {
-                "label": "Grok 视频+GIF 工作流",
+                "label": "视频+GIF 工作流",
                 "names": self._command_names_for_key("grokvg"),
                 "description": "视频→GIF；z/1-5 为压缩成品。",
             },
@@ -1233,8 +1318,10 @@ class KktImagePlugin(Star, KktWebApiMixin):
             "image2_gif": "Image2 通道生成 4x4、16 帧 GIF 分镜。",
             "image2_gif2": "Image2 通道生成 3x3、9 帧 GIF 分镜。",
             "kkgifzip": "本地压缩视频或 GIF 为更小动图；支持 1-5 档。",
-            "grokpack": "Grok 全套：图→视频→GIF；过程合并转发，成品单独发。",
-            "grokvg": "Grok 视频套：视频→GIF；过程合并转发，成品单独发。",
+            "grokpack": "全套：Grok 首帧→视频→GIF；过程合并转发，成品单独发。",
+            "hajimipack": "全套：主通道首帧→Grok 视频→GIF。",
+            "image2pack": "全套：Image2 首帧→Grok 视频→GIF。",
+            "grokvg": "视频套：视频→GIF；过程合并转发，成品单独发。",
             "admin_quota": "管理员查询或设置三条通道日配额。",
             "admin_reset": "管理员清零今日已用次数，累计次数保留。",
             "admin_moderation": "查询或切换本地敏感词审核。",
@@ -1297,7 +1384,13 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 key,
                 include_duration_aliases=key == "video",
                 include_level_aliases=key
-                in {"kkgifzip", "grokpack", "grokvg"},
+                in {
+                    "kkgifzip",
+                    "grokpack",
+                    "hajimipack",
+                    "image2pack",
+                    "grokvg",
+                },
             )[1:]
             for event_filter in getattr(metadata, "event_filters", []):
                 if not isinstance(event_filter, CommandFilter):
@@ -3115,8 +3208,8 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     suffix = normalized[len(folded) :]
                     if suffix.isdigit() and 1 <= int(suffix) <= 5:
                         return "kkgifzip"
-            # 工作流 z 档：/gkpz3 /gvgz5
-            for key in ("grokpack", "grokvg"):
+            # 工作流 z 档：/gkpz3 /hkpz2 /i2pz5 /gvgz5
+            for key in ("grokpack", "hajimipack", "image2pack", "grokvg"):
                 for name in self._command_names_for_key(key):
                     folded = name.casefold()
                     if normalized == folded:
@@ -4633,9 +4726,92 @@ class KktImagePlugin(Star, KktWebApiMixin):
         },
     )
     async def handle_grokpack(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
-        """Grok 全套：图→视频→GIF。过程合并转发，最终 GIF 单独发。"""
+        """全套：Grok 首帧→视频→GIF。"""
         async for result in self._handle_grok_workflow(
-            event, prompt, mode="pack"
+            event, prompt, mode="pack", still_channel="grok", pack_key="grokpack"
+        ):
+            yield result
+
+    @filter.command(
+        "hajimipack",
+        alias={
+            "hkpack",
+            "hkp",
+            "kktpack",
+            "hajimipackz",
+            "hkpackz",
+            "hkpz",
+            "kktpackz",
+            "hajimipackz1",
+            "hajimipackz2",
+            "hajimipackz3",
+            "hajimipackz4",
+            "hajimipackz5",
+            "hkpackz1",
+            "hkpackz2",
+            "hkpackz3",
+            "hkpackz4",
+            "hkpackz5",
+            "hkpz1",
+            "hkpz2",
+            "hkpz3",
+            "hkpz4",
+            "hkpz5",
+            "kktpackz1",
+            "kktpackz2",
+            "kktpackz3",
+            "kktpackz4",
+            "kktpackz5",
+        },
+    )
+    async def handle_hajimipack(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ):
+        """全套：主通道首帧→Grok 视频→GIF。"""
+        async for result in self._handle_grok_workflow(
+            event,
+            prompt,
+            mode="pack",
+            still_channel="hajimi",
+            pack_key="hajimipack",
+        ):
+            yield result
+
+    @filter.command(
+        "image2pack",
+        alias={
+            "i2pack",
+            "i2p",
+            "image2packz",
+            "i2packz",
+            "i2pz",
+            "image2packz1",
+            "image2packz2",
+            "image2packz3",
+            "image2packz4",
+            "image2packz5",
+            "i2packz1",
+            "i2packz2",
+            "i2packz3",
+            "i2packz4",
+            "i2packz5",
+            "i2pz1",
+            "i2pz2",
+            "i2pz3",
+            "i2pz4",
+            "i2pz5",
+        },
+    )
+    async def handle_image2pack(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ):
+        """全套：Image2 首帧→Grok 视频→GIF。"""
+        async for result in self._handle_grok_workflow(
+            event,
+            prompt,
+            mode="pack",
+            still_channel="image2",
+            pack_key="image2pack",
         ):
             yield result
 
@@ -4665,11 +4841,17 @@ class KktImagePlugin(Star, KktWebApiMixin):
         },
     )
     async def handle_grokvg(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
-        """Grok 视频套：视频→GIF。过程合并转发，最终 GIF 单独发。"""
+        """视频套：视频→GIF。"""
         async for result in self._handle_grok_workflow(event, prompt, mode="vg"):
             yield result
 
-    def _parse_workflow_zip_level(self, event: AstrMessageEvent, mode: str) -> int | None:
+    def _parse_workflow_zip_level(
+        self,
+        event: AstrMessageEvent,
+        mode: str,
+        *,
+        pack_key: str = "grokpack",
+    ) -> int | None:
         """解析工作流压缩档：无 z → None（普通 kkgif）；z/zN → 1-5。"""
         raw = (event.get_message_str() or "").strip()
         first = raw.split()[0].lstrip("/") if raw.split() else ""
@@ -4682,7 +4864,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
         for suffix in ("帮助", "help", "?"):
             if token.endswith(suffix):
                 token = token[: -len(suffix)]
-        key = "grokpack" if mode == "pack" else "grokvg"
+        key = pack_key if mode == "pack" else "grokvg"
+        if key not in self._COMMAND_CANONICALS:
+            key = "grokpack" if mode == "pack" else "grokvg"
         for name in sorted(
             self._command_names_for_key(key), key=len, reverse=True
         ):
@@ -4704,36 +4888,77 @@ class KktImagePlugin(Star, KktWebApiMixin):
     def _compose_workflow_still_prompt(
         self, user_prompt: str, *, has_ref_image: bool
     ) -> str:
-        """用户意图是视频；生图时明确「这张图要当视频首帧」。"""
-        body = (user_prompt or "").strip() or "一段简短自然的动态画面"
-        ref_line = (
-            "已有参考图时：在保持参考图主体外观与画风的前提下，调整构图与姿态，"
-            "使画面适合作为视频第一帧，便于后续动作展开。"
+        """用户意图是视频；生图时明确「这张图要当视频首帧」，并补足质量默认。"""
+        body = (user_prompt or "").strip()
+        vague = not body or len(body) < 8
+        if not body:
+            body = "一个鲜明有趣的主体，即将开始一段自然、好看的小动作"
+        ref_block = (
+            "【参考图】已有参考：严格保留主体外观、服饰、画风、材质与关键场景气质；"
+            "只调整姿态与构图，使它更适合作为视频第一帧（略微预备动作、朝向清晰、"
+            "四肢/道具完整入画）。不要换成别人的脸或另一套画风。"
             if has_ref_image
-            else "无参考图时：按用户描述构建清晰主体与场景，构图适合作为视频第一帧。"
+            else "【无参考图】按用户描述构建一个清晰、好看、可动的主体与场景；"
+            "主体居中偏稳，全身或半身完整，轮廓干净，背景简洁不抢戏。"
         )
+        quality = (
+            "【画面质量】高清细腻、光影自然、材质可读；避免糊脸、畸形手指、多余肢体、"
+            "文字乱码、水印、边框、分镜格、拼贴。单张画面，不是四格漫画。"
+            "构图给动作留空间：主体周围略留白，方便下一阶段动起来。"
+        )
+        motion_hint = (
+            "【为后续视频铺垫】姿态像「动作即将开始」：重心稳定、朝向明确、"
+            "表情或肢体有轻微张力；不要已经做完动作的结束定格，也不要完全僵死的证件照姿势。"
+        )
+        if vague:
+            quality += (
+                "用户描述较简略：请自行补全合理的场景、光线与一个简单有表现力的预备动作，"
+                "保持干净好看，不要堆砌杂乱元素。"
+            )
+        style_extra = ""
+        if self.style_prompt:
+            style_extra = f"\n{self.style_prompt}\n"
         return (
             "【工作流·视频首帧静帧】\n"
-            "用户描述的是期望的视频内容与动作，不是普通插画。\n"
-            "请生成一张适合作为视频首帧的静帧：主体完整、姿态自然、构图留有运动空间，"
-            "便于下一阶段图生视频从这一帧开始动起来。\n"
-            f"{ref_line}\n"
-            "不要做成分镜网格、连环画或多格；单张画面即可。"
-            "不要添加字幕、水印、UI。\n\n"
+            "用户描述的是期望的**视频内容与动作**，不是普通插画海报。\n"
+            "请生成**一张**适合作为图生视频首帧的静帧。\n"
+            f"{ref_block}\n"
+            f"{quality}\n"
+            f"{motion_hint}\n"
+            f"{style_extra}"
+            "禁止：分镜网格、连环画、多格、字幕条、水印、UI、二维码。\n\n"
             f"用户期望的视频内容：{body}"
         )
 
-    def _workflow_help_plain(self, mode: str) -> str:
+    def _workflow_help_plain(self, mode: str, still_channel: str = "grok") -> str:
         if mode == "pack":
+            ch_map = {
+                "grok": ("/grokpack", "/gkp", "/grokpackz · /gkpz1-5", "Grok 生图"),
+                "hajimi": (
+                    "/hajimipack",
+                    "/hkp · /kktpack",
+                    "/hajimipackz · /hkpz1-5",
+                    "主通道 /hajimi",
+                ),
+                "image2": (
+                    "/image2pack",
+                    "/i2p",
+                    "/image2packz · /i2pz1-5",
+                    "Image2",
+                ),
+            }
+            primary, aliases, zline, still = ch_map.get(
+                still_channel, ch_map["grok"]
+            )
             return (
-                "Grok 全套工作流\n"
-                "用法：/grokpack <视频意图提示词>\n"
-                "压缩成品：/grokpackz 或 /gkpz1-5\n"
-                "取图逻辑同 /grok（附图/引用/@头像）\n"
-                "流程：图(首帧)→视频→GIF；过程合并转发，成品单独发"
+                f"全套工作流（首帧={still}，视频=Grok）\n"
+                f"用法：{primary} <视频意图提示词>\n"
+                f"别名：{aliases}\n"
+                f"压缩成品：{zline}\n"
+                "流程：首帧图→视频→GIF；过程合并转发，成品单独发"
             )
         return (
-            "Grok 视频+GIF 工作流\n"
+            "视频+GIF 工作流\n"
             "用法：/grokvg <提示词>\n"
             "压缩成品：/grokvgz 或 /gvgz1-5\n"
             "取图逻辑同 /grokvideo（最多一张首帧）\n"
@@ -4746,9 +4971,12 @@ class KktImagePlugin(Star, KktWebApiMixin):
         prompt: GreedyStr,
         *,
         mode: str,
+        still_channel: str = "grok",
+        pack_key: str = "grokpack",
     ):
         """mode=pack：图→视频→GIF；mode=vg：视频→GIF。
 
+        still_channel：pack 首帧通道 grok|hajimi|image2（视频始终 Grok）。
         发送：① 合并转发(过程提示+过程产物) ② 单独发最终 GIF。
         """
         group_id = str(event.get_group_id() or "").strip()
@@ -4756,17 +4984,31 @@ class KktImagePlugin(Star, KktWebApiMixin):
             return
 
         event.stop_event()
-        zip_level = self._parse_workflow_zip_level(event, mode)
+        if mode == "pack" and still_channel not in {"grok", "hajimi", "image2"}:
+            still_channel = "grok"
+        if mode == "pack" and pack_key not in self._WORKFLOW_PACK_STILL:
+            pack_key = next(
+                (
+                    k
+                    for k, v in self._WORKFLOW_PACK_STILL.items()
+                    if v == still_channel
+                ),
+                "grokpack",
+            )
+        zip_level = self._parse_workflow_zip_level(
+            event, mode, pack_key=pack_key if mode == "pack" else "grokvg"
+        )
         prompt = self._extract_prompt(
             event, prompt, self._command_names_for_parser()
         )
+        # 时长：沿用解析（空格秒数）；紧凑秒数本轮不扩展工作流别名
         duration_seconds, prompt, duration_error = self._parse_grokv_duration(
             event,
             prompt,
             self.video_duration,
             self._command_names_for_key("video")
             + self._command_names_for_key(
-                "grokpack" if mode == "pack" else "grokvg",
+                pack_key if mode == "pack" else "grokvg",
                 include_level_aliases=True,
             ),
         )
@@ -4780,7 +5022,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
             "帮助",
             "?",
         }:
-            yield event.plain_result(self._workflow_help_plain(mode))
+            yield event.plain_result(
+                self._workflow_help_plain(mode, still_channel=still_channel)
+            )
             return
 
         try:
@@ -4793,7 +5037,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
             prompt = prompt_stripped
 
         if not prompt_stripped and not image_items:
-            yield event.plain_result(self._workflow_help_plain(mode))
+            yield event.plain_result(
+                self._workflow_help_plain(mode, still_channel=still_channel)
+            )
             return
 
         if mode == "vg" and len(image_items) > 1:
@@ -4802,7 +5048,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             )
             return
 
-        # pack 生图阶段：grok 可多图；视频阶段只用第一张/生成图
+        # pack 生图：按 still_channel；image2 多参考走现有拦截；视频只用生成图/首张
         sensitive_msg = self._check_sensitive_prompt(prompt_stripped)
         if sensitive_msg:
             yield event.plain_result(sensitive_msg)
@@ -4822,8 +5068,23 @@ class KktImagePlugin(Star, KktWebApiMixin):
             )
             return
 
+        api_command = "grok"
         if mode == "pack":
-            creds = self._resolve_api_credentials("grok")
+            api_command = (
+                "image2"
+                if still_channel == "image2"
+                else ("grok" if still_channel == "grok" else "hajimi")
+            )
+            if (
+                api_command == "image2"
+                and len(image_items) > 1
+                and self._should_use_images_api(api_command, self.image2_model)
+            ):
+                yield event.plain_result(
+                    self._format_image2_multi_ref_reject(image_items)
+                )
+                return
+            creds = self._resolve_api_credentials(api_command)
             if isinstance(creds, str):
                 yield event.plain_result(creds)
                 return
@@ -4832,8 +5093,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             if cd_msg:
                 yield event.plain_result(cd_msg)
                 return
-            # grok 记账通道与 /grok 一致（当前归 main）
-            billing_image = self._channel_for_command("grok")
+            billing_image = self._channel_for_command(api_command)
             quota_img = await self._check_channel_quota(event, billing_image)
             if quota_img:
                 yield event.plain_result(quota_img)
@@ -4841,6 +5101,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
         else:
             api_base, api_keys, model = "", [], ""
             billing_image = ""
+            api_command = "grok"
 
         quota_video = await self._check_channel_quota(event, self._CHANNEL_VIDEO)
         if quota_video:
@@ -4857,11 +5118,17 @@ class KktImagePlugin(Star, KktWebApiMixin):
         self._mark_video_cooldown(event)
         asyncio.create_task(self._send_reaction_emoji(event))
 
+        still_label = {
+            "grok": "Grok",
+            "hajimi": "主通道",
+            "image2": "Image2",
+        }.get(still_channel, still_channel)
         zip_hint = f"·压缩{zip_level}档" if zip_level else ""
+        still_hint = f"·首帧{still_label}" if mode == "pack" else ""
         try:
             await event.send(
                 event.plain_result(
-                    f"喵～工作流启动{zip_hint}，做好后一起端上来，请等一下哦～"
+                    f"工作流启动{still_hint}{zip_hint}，请稍等…"
                 )
             )
         except Exception:
@@ -4876,12 +5143,16 @@ class KktImagePlugin(Star, KktWebApiMixin):
         image_url: str | None = None
         image_items_for_video: list[dict] = []
         cleanup_paths: list[str] = []
+        cmd_log = (
+            f"{pack_key}{f'z{zip_level}' if zip_level else ''}"
+            if mode == "pack"
+            else f"grokvg{f'z{zip_level}' if zip_level else ''}"
+        )
         task_id = self._start_task_log(
             channel="workflow",
-            command=f"{'grokpack' if mode == 'pack' else 'grokvg'}"
-            + (f"z{zip_level}" if zip_level else ""),
+            command=cmd_log,
             prompt=prompt_stripped,
-            model="workflow",
+            model=str(model or "workflow"),
         )
 
         def add_plain_node(text: str, name: str = "康康喵") -> None:
@@ -4910,7 +5181,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
         try:
             # ── 1) 全套：生图（视频首帧意图）──
             if mode == "pack":
-                add_plain_node("喵～先去画一张适合当视频首帧的参考图，请稍等～")
+                add_plain_node(f"先用{still_label}画视频首帧，请稍等…")
                 still_prompt = self._compose_workflow_still_prompt(
                     prompt_stripped, has_ref_image=bool(image_items)
                 )
@@ -4921,10 +5192,10 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     api_base=api_base,
                     api_keys=api_keys,
                     model=model,
-                    command="grok",
+                    command=api_command,
                 )
                 if not result:
-                    add_plain_node("呜…参考图没画出来，工作流中断了喵。")
+                    add_plain_node("首帧图生成失败，工作流中断。")
                     await self._send_workflow_process_forward(event, process_nodes)
                     self._finish_task_log(
                         task_id, status="failed", code="empty_image", progress=0
@@ -4933,7 +5204,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     return
                 image_path = await self._materialize_image(result)
                 if not image_path:
-                    add_plain_node("呜…参考图下载失败了喵。")
+                    add_plain_node("首帧图下载失败。")
                     await self._send_workflow_process_forward(event, process_nodes)
                     self._finish_task_log(
                         task_id, status="failed", code="materialize_image", progress=0
@@ -4942,7 +5213,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     return
                 cleanup_paths.append(image_path)
                 await self._record_successful_usage(billing_image)
-                add_plain_node("参考图好啦，这张会当作视频首帧用哦～")
+                add_plain_node(f"首帧好了（{still_label}），接着做视频。")
                 add_image_node(image_path)
                 # 视频首帧：用生成图
                 try:
@@ -4977,7 +5248,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 )
 
             # ── 2) 视频 ──
-            add_plain_node("接着去做视频啦，可能要等一会儿，蹭蹭～")
+            add_plain_node("开始生成视频，可能要等一会儿…")
             final_prompt = self._compose_video_prompt(
                 prompt_stripped,
                 has_ref_image=bool(image_url),
@@ -5006,14 +5277,14 @@ class KktImagePlugin(Star, KktWebApiMixin):
             video_path = await self._transcode_video_for_qq(raw_path)
             cleanup_paths.extend([raw_path, video_path])
             await self._record_successful_usage(self._CHANNEL_VIDEO)
-            add_plain_node("视频做好了，请先在这里看看过程喵～")
+            add_plain_node("视频好了（过程产物）。")
             add_video_node(video_path)
 
             # ── 3) GIF（最终成品）──
             add_plain_node(
-                f"最后捏成表情包"
-                + (f"（{zip_level} 档）" if zip_level else "")
-                + "，马上就好～"
+                "最后转成 GIF"
+                + (f"（{zip_level} 档压缩）" if zip_level else "")
+                + "…"
             )
             if zip_level:
                 gif_path, _, _, _, _ = await self._convert_media_to_zip_gif(
@@ -5022,7 +5293,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             else:
                 gif_path, _, _, _ = await self._convert_video_to_gif(video_path)
             cleanup_paths.append(gif_path)
-            add_plain_node("过程都在上面啦，成品表情包单独发给主人～")
+            add_plain_node("过程见上；最终 GIF 单独发送。")
 
             await self._send_workflow_process_forward(event, process_nodes)
             # 最终成品单独发
@@ -5046,7 +5317,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             )
         except GrokVideoError as exc:
             logger.error("[kkt] workflow video failed: %s", exc)
-            add_plain_node(f"呜…视频这一步失败了：{self._safe_video_failure(exc)}")
+            add_plain_node(f"视频失败：{self._safe_video_failure(exc)}")
             await self._send_workflow_process_forward(event, process_nodes)
             self._finish_task_log(
                 task_id, status="failed", code=exc.code or "video_failed", progress=0
@@ -5054,7 +5325,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             yield event.plain_result(self._safe_video_failure(exc))
         except Exception as exc:
             logger.exception("[kkt] workflow failed: %s", exc)
-            add_plain_node("呜…工作流中途出错了，请主人稍后再试喵。")
+            add_plain_node("工作流中途出错，请稍后重试。")
             await self._send_workflow_process_forward(event, process_nodes)
             self._finish_task_log(
                 task_id, status="failed", code=type(exc).__name__, progress=0
@@ -5428,10 +5699,10 @@ class KktImagePlugin(Star, KktWebApiMixin):
     def _default_video_prompt_for_ref() -> str:
         """空 prompt + 仅参考图时的中性默认指令（人/动物/静物/风景通用）。"""
         return (
-            "参考图中的主体自然轻微动起来，镜头稳定；"
-            "有生物则做轻微呼吸、眨眼或摆动等小动作，"
-            "是静物或风景则做轻风、光影、云雾等缓慢环境变化；"
-            "不要擅自添加新角色或改掉主体外观。"
+            "以参考图为首帧，让主体做一段简单、好看、可循环的自然动作："
+            "有生物则轻微呼吸、眨眼、点头或轻摆；"
+            "静物/风景则光影缓慢变化、轻风或云雾微动；"
+            "镜头稳定，主体不变形、不换人、不换画风。"
         )
 
     def _compose_video_prompt(
@@ -5441,13 +5712,17 @@ class KktImagePlugin(Star, KktWebApiMixin):
         has_ref_image: bool = False,
         duration: int | None = None,
     ) -> str:
-        """为 /grokvideo 拼装静态前缀 + 用户指令（与生图 style_prompt 分离）。"""
+        """为 /grokvideo 与工作流拼装质量增强前缀 + 用户指令。"""
         body = (prompt or "").strip()
+        vague = not body or len(body) < 8
         if not body:
             body = (
                 self._default_video_prompt_for_ref()
                 if has_ref_image
-                else "请生成一段简短自然的视频"
+                else (
+                    "一段清晰好看的短视频：鲜明主体、自然小动作、稳定镜头、干净背景，"
+                    "节奏舒适，适合聊天里观看。"
+                )
             )
         if not self.video_prompt_enhance:
             return body
@@ -5456,24 +5731,35 @@ class KktImagePlugin(Star, KktWebApiMixin):
         parts: list[str] = []
         if has_ref_image:
             subject_line = (
-                "1) 主体一致：严格以参考图为首帧，还原主体外观、画风、材质与场景，"
-                "只增加合理动作与镜头运动；不要擅自添加新角色或改掉主体。"
+                "1) 首帧与主体：严格以参考图为第一帧；"
+                "还原主体外观、服饰、画风、材质、比例与场景气质；"
+                "只增加合理动作与极轻镜头运动；禁止换脸、换人、换画风、加新角色。"
             )
         else:
             subject_line = (
-                "1) 主体一致：全程保持同一主体的外观与身份，按用户文字构建场景。"
+                "1) 主体：全程同一主体、同一身份与外观；"
+                "主体清晰可读、位置稳定；按用户文字构建场景。"
             )
         parts.append(
-            "【视频生成约束】"
-            f"{subject_line}"
-            "2) 运动连贯：动作物理可信，禁止瞬移、结构崩坏、多头多肢、脸部/形体融化。"
-            "3) 镜头稳定：以稳定画面为主，可轻推/轻摇；避免剧烈抖动、乱切、闪帧。"
-            f"4) 时序：约 {dur} 秒内完成用户描述的动作，节奏自然，可轻微缓入缓出。"
-            "5) 画面干净：不无故添加字幕、水印、UI 边框；用户明确要求文字时再出现。"
+            "【视频质量与运动】\n"
+            f"{subject_line}\n"
+            "2) 运动：物理可信、时间连续；缓入缓出；禁止瞬移、跳帧、肢体崩坏、"
+            "多头多肢、脸部融化、画面撕裂。\n"
+            "3) 镜头：以固定或极轻推/轻摇为主；禁止剧烈抖动、乱切、闪帧、甩镜。\n"
+            f"4) 时长节奏：约 {dur} 秒内完成用户描述的核心动作，开头可有短预备，"
+            "结尾可自然收住或轻微回环感。\n"
+            "5) 画面：干净、对比舒适、细节可读；"
+            "默认不出现字幕、水印、UI、边框、二维码（用户明确要求文字时除外）。\n"
+            "6) 观感：适合社交软件短视频；动作简单有表现力，不要堆砌杂乱事件。"
         )
+        if vague:
+            parts.append(
+                "【描述较简时】请自行补全一个简单、好看、易懂的动作与匹配光影，"
+                "保持干净高级，不要过度复杂剧情。"
+            )
         if self.prefer_chinese_text:
             parts.append(
-                "【画面文字】若出现可读文字（字幕、招牌、UI），默认简体中文；"
+                "【画面文字】若出现可读文字，默认简体中文；"
                 "仅当用户明确要求其他语言或专有名词需保留原文时除外。"
             )
         if self.prefer_cn_locale and not has_ref_image:

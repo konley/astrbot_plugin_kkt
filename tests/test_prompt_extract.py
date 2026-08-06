@@ -905,7 +905,7 @@ def test_compose_video_prompt_static_prefix():
     plugin.video_duration = 8
 
     text = plugin._compose_video_prompt("猫跳一下", has_ref_image=False, duration=5)
-    assert "视频生成约束" in text
+    assert "视频质量与运动" in text
     assert "约 5 秒" in text
     assert "猫跳一下" in text
     assert "用户指令" in text
@@ -915,19 +915,19 @@ def test_compose_video_prompt_static_prefix():
     with_ref = plugin._compose_video_prompt(
         "挥手", has_ref_image=True, duration=8
     )
-    assert "参考图为首帧" in with_ref
+    assert "参考图" in with_ref and "首帧" in with_ref
     assert "东亚" not in with_ref
     assert "挥手" in with_ref
 
     empty_ref = plugin._compose_video_prompt("", has_ref_image=True, duration=8)
-    assert "主体自然轻微动起来" in empty_ref
-    assert "静物或风景" in empty_ref
-    assert "不要擅自添加新角色" in empty_ref
+    assert "参考图" in empty_ref
+    assert "呼吸" in empty_ref or "眨眼" in empty_ref
+    assert "静物" in empty_ref or "风景" in empty_ref
 
     plugin.video_prompt_enhance = False
     raw = plugin._compose_video_prompt("原文直传", has_ref_image=False, duration=8)
     assert raw == "原文直传"
-    assert "视频生成约束" not in raw
+    assert "视频质量" not in raw
 
     plugin.video_style_prompt = "【自定义】禁止运镜"
     plugin.video_prompt_enhance = True
@@ -1181,13 +1181,23 @@ def test_workflow_aliases_and_still_prompt():
     plugin = object.__new__(Plugin)
     plugin._command_aliases = Plugin._load_command_aliases({})
     plugin._command_alias_map = plugin._build_command_alias_map()
+    plugin.style_prompt = ""
     names = plugin._command_names_for_parser()
     assert "grokpack" in names and "gkpz3" in names
+    assert "hajimipack" in names and "hkpz2" in names
+    assert "image2pack" in names and "i2pz5" in names
     assert "grokvg" in names and "gvgz5" in names
     assert plugin._parse_workflow_zip_level(FakeEvent([], "/grokpack"), "pack") is None
     assert plugin._parse_workflow_zip_level(FakeEvent([], "/gkpz"), "pack") == 1
     assert plugin._parse_workflow_zip_level(FakeEvent([], "/gkpz3"), "pack") == 3
+    assert (
+        plugin._parse_workflow_zip_level(
+            FakeEvent([], "/hkpz2"), "pack", pack_key="hajimipack"
+        )
+        == 2
+    )
     assert plugin._parse_workflow_zip_level(FakeEvent([], "/gvgz5"), "vg") == 5
     still = plugin._compose_workflow_still_prompt("猫在雨中奔跑", has_ref_image=False)
     assert "视频首帧" in still and "猫在雨中奔跑" in still
     assert "分镜" in still or "单张" in still
+    assert "画质" in still or "高清" in still
