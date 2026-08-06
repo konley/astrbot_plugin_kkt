@@ -428,7 +428,8 @@ def test_build_help_text_is_concise():
     assert "/hajimi" in help_text
     assert "image2" in help_text
     assert "调整日限额" not in help_text
-    assert len(help_text.splitlines()) <= 8
+    assert len(help_text.splitlines()) <= 10
+    assert "/grokpack" in help_text
 
 
 def test_command_aliases_keep_defaults_and_skip_collisions():
@@ -527,10 +528,12 @@ def test_help_handler_sends_two_forward_nodes():
     assert len(event.sent) == 1
     nodes = event.sent[0].chain[0]
     assert isinstance(nodes, Comp.Nodes)
-    assert len(nodes.nodes) == 2
+    assert len(nodes.nodes) == 3
     assert "基础操作" in nodes.nodes[0].content[0].text
     assert "当前别名" in nodes.nodes[1].content[0].text
     assert "/paint" in nodes.nodes[1].content[0].text
+    assert "工作流" in nodes.nodes[2].content[0].text
+    assert "/grokpack" in nodes.nodes[2].content[0].text
 
 
 def test_format_image2_multi_ref_reject_includes_count_and_labels():
@@ -1161,3 +1164,19 @@ def test_kkgifzip_command_names_in_parser_and_catalog():
     assert "kkgifzip" in keys
     aliases = Plugin._load_command_aliases({})
     assert "gifz" in aliases["kkgifzip"] and "gifzip" in aliases["kkgifzip"]
+
+
+def test_workflow_aliases_and_still_prompt():
+    plugin = object.__new__(Plugin)
+    plugin._command_aliases = Plugin._load_command_aliases({})
+    plugin._command_alias_map = plugin._build_command_alias_map()
+    names = plugin._command_names_for_parser()
+    assert "grokpack" in names and "gkpz3" in names
+    assert "grokvg" in names and "gvgz5" in names
+    assert plugin._parse_workflow_zip_level(FakeEvent([], "/grokpack"), "pack") is None
+    assert plugin._parse_workflow_zip_level(FakeEvent([], "/gkpz"), "pack") == 1
+    assert plugin._parse_workflow_zip_level(FakeEvent([], "/gkpz3"), "pack") == 3
+    assert plugin._parse_workflow_zip_level(FakeEvent([], "/gvgz5"), "vg") == 5
+    still = plugin._compose_workflow_still_prompt("猫在雨中奔跑", has_ref_image=False)
+    assert "视频首帧" in still and "猫在雨中奔跑" in still
+    assert "分镜" in still or "单张" in still

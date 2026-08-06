@@ -74,6 +74,18 @@
         "type": "list",
         "default": ["gifz", "gifzip"],
         "hint": "主指令固定为 /kkgifzip；默认 gifz、gifzip。每个别名也支持末尾 1-5 档，如 /gifz3。"
+      },
+      "grokpack_aliases": {
+        "description": "Grok 全套工作流别名",
+        "type": "list",
+        "default": ["gkpack", "gkp", "grokpackz", "gkpackz", "gkpz"],
+        "hint": "主指令 /grokpack；带 z 的别名支持 1-5 压缩档，如 /gkpz3。"
+      },
+      "grokvg_aliases": {
+        "description": "Grok 视频+GIF 工作流别名",
+        "type": "list",
+        "default": ["gkvg", "gvg", "grokvgz", "gkvgz", "gvgz"],
+        "hint": "主指令 /grokvg；带 z 的别名支持 1-5 压缩档，如 /gvgz5。"
       }
     }
   },
