@@ -280,7 +280,7 @@ def build_gif_help_text(command_groups: dict[str, dict[str, object]] | None = No
         f"Image2 16/9 帧：{_format_command_names(names('image2_gif', ['image2gif']))} / "
         f"{_format_command_names(names('image2_gif2', ['image2gif2']))}\n"
         "视频转 GIF：引用或附带一个视频后使用 /kkgif\n"
-        "压缩表情包：/kkgifzip 或 /kkgifzip1-5（视频或 GIF；数字越大越糊越小；静态图不支持）\n"
+        "压缩：/kkgifzip 或 /kkgifzip1-5（视频或 GIF；数字越大压得越狠；静态图不支持）\n"
         "每个分镜指令都支持提示词；无提示词时由模型选择简单循环动作。"
     )
 
@@ -303,7 +303,7 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.18.1",
+    "0.18.2",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
@@ -373,47 +373,47 @@ class KktImagePlugin(Star, KktWebApiMixin):
         r"^/?(?:kkgifzip[1-5]?|kkgif|grokvideo\d+|grokv\d+|gkv\d+|gv\d+|grokvideo|grokv|gkv|gv|grok2k|gk2k|gk2|grok2|grok|gk|image2gif2|image2gif|hajimigif2|hajimigif|kktgif|hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
         re.IGNORECASE | re.DOTALL,
     )
-    # /kkgifzip 五档：固定 ~10fps；靠分辨率/色数/像素块(crush)/模糊做出「糊 JPG」感
-    # crush：先缩到 dim/crush 再用 neighbor 放大 → 色块感；blur：gblur sigma
+    # /kkgifzip 五档：固定 ~10fps；1 档≈旧 2 档压感，色数整体抬高
+    # crush：先缩到 dim/crush 再用 neighbor 放大；blur：gblur sigma
     _KKGIFZIP_PRESETS: ClassVar[dict[int, dict[str, float | int | str]]] = {
         1: {
-            "dimension": 280,
+            "dimension": 220,
             "fps": 10,
-            "colors": 96,
-            "crush": 1.6,
-            "blur": 0.35,
+            "colors": 160,
+            "crush": 2.0,
+            "blur": 0.4,
             "dither": "bayer:bayer_scale=2",
         },
         2: {
-            "dimension": 220,
+            "dimension": 180,
             "fps": 10,
-            "colors": 64,
-            "crush": 2.0,
+            "colors": 128,
+            "crush": 2.4,
             "blur": 0.55,
             "dither": "bayer:bayer_scale=3",
         },
         3: {
-            "dimension": 180,
+            "dimension": 150,
             "fps": 10,
-            "colors": 48,
-            "crush": 2.5,
-            "blur": 0.75,
-            "dither": "none",
+            "colors": 96,
+            "crush": 2.8,
+            "blur": 0.7,
+            "dither": "bayer:bayer_scale=3",
         },
         4: {
-            "dimension": 140,
+            "dimension": 120,
             "fps": 10,
-            "colors": 32,
+            "colors": 72,
             "crush": 3.2,
-            "blur": 0.95,
+            "blur": 0.85,
             "dither": "none",
         },
         5: {
             "dimension": 100,
             "fps": 10,
-            "colors": 24,
-            "crush": 4.0,
-            "blur": 1.2,
+            "colors": 56,
+            "crush": 3.8,
+            "blur": 1.0,
             "dither": "none",
         },
     }
@@ -2994,20 +2994,16 @@ class KktImagePlugin(Star, KktWebApiMixin):
         if not videos and not gifs:
             if static_count:
                 yield event.plain_result(
-                    "不支持静态图片（jpg/png 等）。请附带或回复一个视频或 GIF。\n"
-                    f"当前档位：{level}（/kkgifzip1-5，数字越大越糊越小）"
+                    f"不支持静态图。请附带或回复视频/GIF（当前 {level} 档）。"
                 )
             else:
                 yield event.plain_result(
-                    "请附带或回复一个视频或 GIF 后再发送 /kkgifzip。\n"
-                    f"当前档位：{level}；静态图不支持。\n"
-                    "帮助：/kkgifzip 帮助"
+                    f"请附带或回复一个视频或 GIF（当前 {level} 档）。"
                 )
             return
 
         source_kind = "video" if videos else "gif"
         component = videos[0] if videos else gifs[0]
-        preset = self._KKGIFZIP_PRESETS[level]
         task_id = self._start_task_log(
             channel="gif",
             command=f"kkgifzip{level}",
@@ -3018,13 +3014,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
         output_path = ""
         try:
             source_path = await component.convert_to_file_path()
-            await event.send(
-                event.plain_result(
-                    f"喵～正在按档位 {level} 压成糊 JPG 风"
-                    f"（{int(preset['dimension'])}px · {int(preset['fps'])}fps · "
-                    f"{int(preset['colors'])}色 · crush×{preset['crush']}），马上就好啦。"
-                )
-            )
+            await event.send(event.plain_result(f"压缩中，{level} 档…"))
             if source_kind == "video":
                 output_path, duration, dimension, fps, colors = (
                     await self._convert_media_to_zip_gif(
@@ -3070,11 +3060,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     file=str(Path(output_path).resolve()), path=output_path
                 )
             await event.send(MessageChain([image]))
-            await event.send(
-                event.plain_result(
-                    f"压缩完成（档位 {level} · {dimension}px · {fps}fps · {colors}色），喵～"
-                )
-            )
+            await event.send(event.plain_result(f"完成，{level} 档。"))
         except Exception as exc:
             logger.exception("[kkt] kkgifzip 转换失败: %s", exc)
             code = "video_too_long" if "16 秒" in str(exc) else type(exc).__name__
@@ -3112,22 +3098,12 @@ class KktImagePlugin(Star, KktWebApiMixin):
         return 1
 
     def _kkgifzip_help_text(self) -> str:
-        lines = [
-            "康康 GIF 压缩（糊 JPG / 表情包风）",
-            "用法：引用或附带一个视频 / GIF 后发送 /kkgifzip 或 /kkgifzip1-5",
-            "裸 /kkgifzip = 第 1 档；数字越大越糊（像素块 + 少色 + 轻模糊）。",
-            "各档帧率固定约 10fps，不靠降帧变糊。",
-            "不支持静态图片（jpg/png 等）。",
-            "",
-            "档位：",
-        ]
-        for level, preset in self._KKGIFZIP_PRESETS.items():
-            lines.append(
-                f"  {level}：{int(preset['dimension'])}px · {int(preset['fps'])}fps · "
-                f"{int(preset['colors'])}色 · crush×{preset['crush']} · blur {preset['blur']}"
-            )
-        lines.append("限制：视频最长 16 秒；输出不含声音。")
-        return "\n".join(lines)
+        return (
+            "GIF 压缩\n"
+            "用法：引用/附带视频或 GIF 后发 /kkgifzip 或 /kkgifzip1-5\n"
+            "裸指令 = 1 档；数字越大压得越狠。不支持静态图。\n"
+            "视频最长 16 秒。"
+        )
 
     async def _collect_videos(self, event: AstrMessageEvent) -> list:
         """Collect quoted videos first, then videos in the current message."""

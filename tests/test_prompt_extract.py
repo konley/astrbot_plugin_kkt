@@ -1133,7 +1133,9 @@ def test_kkgifzip_level_parser_and_presets():
     assert "flags=neighbor" in graph and "gblur=sigma=0.75" in graph
     assert "palettegen=max_colors=48" in graph and "dither=none" in graph
     help_text = Plugin._kkgifzip_help_text(plugin)
-    assert "/kkgifzip1-5" in help_text and "静态" in help_text and "crush" in help_text
+    assert "/kkgifzip1-5" in help_text and "静态" in help_text
+    assert int(Plugin._KKGIFZIP_PRESETS[1]["colors"]) >= 128
+    assert int(Plugin._KKGIFZIP_PRESETS[1]["dimension"]) == 220
 
 
 def test_kkgifzip_command_names_in_parser_and_catalog():
