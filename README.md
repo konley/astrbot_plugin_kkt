@@ -1,476 +1,464 @@
 # 康康图（astrbot_plugin_kkt）
 
-AstrBot 图片生成与编辑插件。通过 OpenAI 兼容接口调用图像模型，支持文生图、图生图、多图参考、引用消息、固定 `/hajimi` 和 `/kkt` 命令，以及群聊黑名单。
+AstrBot 多通道媒体插件，支持 OpenAI 兼容生图/修图、Grok Images API、Grok 2K 文生图、GIF 分镜，以及 grok2api 异步视频。插件包含 `KKT Studio` WebUI 控制台，用于连接测试、运行状态查看和常用参数管理。
 
-当前默认接口为：
+当前版本：`0.18.0`
 
-```text
-https://newapi.qianqianye.com/v1/chat/completions
-```
+## 功能总览
 
-## 功能
-
-- 文生图：只提供文字描述即可生成图片。
-- 图生图：发送图片并附带提示词，或回复图片后编辑。
-- 引用图文：引用消息中的文字会作为 Prompt，引用图片会作为参考图。
-- 多图输入：引用图片和当前消息图片会合并发送，并自动去重。
-- 忽略引用产生的 @：引用消息时平台自动附带的 @ 不会进入 Prompt，也不会自动触发头像参考图。
-- 固定命令：`/hajimi` 和 `/kkt`，两者都可以触发插件。
-- 群聊黑名单：黑名单群不会响应，也不会调用图像 API。
-- 异步请求、失败重试和临时文件自动清理。
-- Key 轮询：主 Key 失败后按顺序切换备用 Key（`/hajimi` `/kkt` 与 `/image2` 各自独立）。
-- `/image2` 默认走 OpenAI Images API：文生图 `/images/generations`，有参考图时 `/images/edits`（与 `/kkt` 的 chat 路径隔离）。
+- `/hajimi`、`/kkt`：主图像通道，支持文生图、多图参考、引用图和 @头像。
+- `/image2`：独立 Image2 通道，可配置独立基址、协议、模型和 Key。
+- `/grok`、`/gk`：使用 `grok-imagine-image-quality`，通过 grok2api Images API 生图/多图编辑。
+- `/grok2`、`/grok2k`、`/gk2`、`/gk2k`：Grok 2K 文生图，不接受参考图。
+- `/grokvideo`、`/grokv`、`/gkv`、`/gv`：grok2api 文生视频/单图生视频。
+- GIF 分镜：`/hajimigif`、`/kktgif`、`/hajimigif2`、`/image2gif`、`/image2gif2`。
+- `/kkgif`：把当前消息或回复中的一个视频本地转换为 GIF，不调用模型。
+- `/kkgifzip`、`/kkgifzip1-5`：五档压缩视频或 GIF 为表情包风（本地 FFmpeg）；静态图不支持。
+- 引用消息文字自动合并到提示词，引用图片自动作为参考图。
+- 多图按“引用图 → 当前消息图片 → @头像”顺序收集，并自动去重。
+- GIF/WebP 参考图可在后台选择首帧、中间帧或末帧。
+- 视频任务有全局并发、每用户并发、用户冷却和日额度保护。
+- 每个主行为都支持多个自定义别名，默认别名全部保留；视频别名支持末尾附加时长。
+- 视频 Prompt 增强、视频额外提示词、中文文字和轻量本地化约束均可独立配置。
+- 失败重试、Key 轮询、敏感词前置拦截和临时文件清理。
+- QQ/NapCat 视频发送前自动转成更兼容的 H.264 + AAC MP4。
 
 ## 安装
 
-将插件目录放入 AstrBot 插件目录：
+将插件目录放入：
 
 ```text
 AstrBot/data/plugins/astrbot_plugin_kkt/
 ```
 
-插件目录中应包含：
+目录主要文件：
 
 ```text
 astrbot_plugin_kkt/
 ├── main.py
+├── video_client.py
+├── web_api.py
 ├── metadata.yaml
 ├── _conf_schema.json
+├── pages/dashboard/
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
 ├── requirements.txt
 └── README.md
 ```
 
-安装依赖后，在 AstrBot WebUI 中重载插件，或重启 AstrBot。
+依赖：
 
-## 快速配置
+- `aiohttp`
+- `Pillow`
+- 系统命令 `ffmpeg`、`ffprobe`（视频发送转码需要）
 
-首次使用前，在 AstrBot WebUI 的插件配置中填写：
+安装依赖后，在 AstrBot WebUI 重载插件即可，不需要重启机器人。
+
+## KKT Studio WebUI
+
+在 AstrBot 插件管理中打开 **KKT Studio 控制台**。
+
+控制台提供：
+
+- 主图像、Image2、Grok 生图、Grok 视频四条通道的地址和 Key 状态；两个 Grok 通道相邻显示。
+- 四个主行为以及 GIF 分镜的自定义别名列表，页面会列出 canonical 指令和全部别名。
+- 连接测试：只请求 `/healthz` 和 `/v1/models`，不会创建图片或视频任务。
+- 视频并发占用、全局上限、每用户上限、冷却和清理延迟。
+- 视频默认时长、宽高比、分辨率、轮询间隔、超时、Prompt 增强和额外提示词。
+- 动图参考帧选择：首帧/中间帧/末帧。
+- 主通道、Image2、视频的今日额度和累计次数。
+- 通用重试、图片输入、中文软约束、消息回应、GIF、群黑名单和本地审核配置。
+- 最近任务文本日志：Prompt、模型、通道、状态、进度、开始/结束时间、耗时和请求 ID；不保存图片。
+- 所有普通配置项统一保存。保存后需要重载插件才会应用到运行实例。
+
+页面使用 AstrBot Plugin Page bridge，不直接访问插件 API，也不把完整 Key 显示在页面上。若页面提示桥接 SDK 未加载，请从 AstrBot 插件管理中的页面入口重新打开，不要直接打开 HTML 文件。
+
+静态配置仍可在 AstrBot 原生配置面板编辑；WebUI 与 `_conf_schema.json` 使用同一套字段，普通配置不会只存在于 Page 页面。
+
+## 首次配置
+
+### 主图像通道
+
+`主图像通道（/hajimi /kkt）`：
 
 ```text
-api_key = 你的 NewAPI 主 API Key
+api_base = https://your-openai-compatible-host/v1
+api_key = your-main-key
+model = your-image-model
 ```
 
-可选：填写备用 Key 列表，主 Key 失败后自动轮询：
+### Grok 通道
+
+推荐先填写 Grok 生图通道。视频通道的地址、Key 和备用 Key 留空时，会逐项复用 Grok 生图通道：
 
 ```text
-backup_api_keys = ["备用Key1", "备用Key2"]
+grok_api_base = https://g2a.example.com
+grok_api_key = g2a_xxx
+grok_backup_api_keys = g2a_backup_1, g2a_backup_2
 ```
 
-`/image2` 通道独立配置：
+视频需要单独覆盖时再填写：
 
 ```text
-image2_api_key = image2 主 Key
-image2_backup_api_keys = ["image2备用Key1"]
-image2_api_mode = images          # images | chat | auto
+video_api_base = https://video.example.com
+video_api_key = g2a_video_xxx
+video_backup_api_keys = g2a_video_backup
+```
+
+地址可以写根地址或带 `/v1`，不要写完整接口路径。Grok 生图留空时回退主 `api_base`/`api_key`；视频未填写的字段回退 Grok 生图对应字段。
+
+### Image2 通道
+
+Image2 使用独立 Key：
+
+```text
+image2_api_key = image2-key
 image2_model = gpt-image-2
+image2_api_base = https://your-host/v1
+image2_api_mode = images
 image2_size = 1024x1024
 ```
 
-说明：
+`image2_api_key` 不会回退到主 `api_key`。
 
-- `image2_api_mode=images`（默认）：无参考图 → `/v1/images/generations`；有参考图 → `/v1/images/edits`（仅 1 张）
-- **多参考图硬拦截**（images/auto→images）：收到 ≥2 张参考图时直接提示用法，**不请求上游、不扣日配额、不记 CD**
-- `image2_api_mode=chat`：与 `/kkt` 一样走 `chat/completions`（仅当你的 image2 模型支持 chat 出图时；多图不拦截）
-- `/hajimi` `/kkt` **始终**走 `chat/completions`，不受 `image2_api_mode` 影响
+### 配置同步与视频 Prompt
 
-默认配置：
+普通配置面板和 KKT Studio 使用同一套配置字段。除了通道地址/Key 外，还包括：
 
-```text
-api_base = https://newapi.qianqianye.com/v1
-model = gemini-3.1-flash-image
-temperature = 0.7
-```
+- `video_prompt_enhance`：默认开启，为视频请求追加主体一致、动作连贯、镜头和时序约束。
+- `video_style_prompt`：视频专用额外提示词，与图片 `style_prompt` 分开。
+- `video_duration`、`video_aspect_ratio`、`video_resolution`、轮询/超时、并发、冷却和清理延迟。
+- `enable_reply_image`、`enable_at_avatar`、`animated_reference_frame`、多图标签、中文软约束和回应表情。
+- 分通道日额度、预估单价、GIF/视频转 GIF 参数、群黑名单和本地敏感词审核。
+- `*_command_aliases`：每个主行为可配置多个别名；默认别名自动保留。
 
-也可以通过环境变量提供主 API Key：
+WebUI 只显示 Key 是否配置及备用 Key 数量，不回显密钥。填写新 Key 后保存并重载插件；留空不会覆盖已保存的 Key。
 
-```text
-NEW_API_KEY
-```
+## 指令清单
 
-插件配置中的 `api_key` 优先级更高。日志里只会打印 Key 掩码（如 `sk-0gb...YsQh`），不会输出完整密钥。
+行为表中的 canonical 主指令固定为 `/hajimi`、`/image2`、`/grok`、`/grok2` 和 `/grokvideo`；插件配置页面会同时列出当前生效的全部别名。默认别名不会因为填写自定义列表而消失。
 
-### Key 轮询策略
-
-1. 先用主 Key（`api_key` 或 `image2_api_key`）。
-2. 同一 Key 内按 `max_retry` 重试网络错误 / 429 / 5xx。
-3. 当前 Key 仍失败（含 401/403/429/5xx、上游 no channel）时，切换下一个备用 Key。
-4. 模型明确用文字拒答时不再切换 Key（避免无意义消耗）。
-5. 所有 Key 都失败后，把最后一次错误返回给用户。
-
-### 分通道日配额与预估费用（仅管理员）
-
-计费桶：
-
-- `main`：`/kkt` + `/hajimi` 共用
-- `image2`：仅 `/image2`
-
-成功出图后才记 1 次（失败不扣）。持久化 `data/plugin_data/kkt/usage.json`（含今日 `daily` 与累计 `total`）。
-
-WebUI 可配置：
+别名配置项如下，均支持填写多个值（逗号或换行分隔）：
 
 ```text
-daily_quota_main / daily_quota_image2   # 各通道日上限，0=不限制
-cost_main_usd / cost_image2_usd         # 预估 USD/次（仅展示）
+main_command_aliases = kkt
+image2_command_aliases =
+grok_command_aliases = gk
+grok2_command_aliases = grok2k, gk2, gk2k
+video_command_aliases = grokv, gkv, gv
 ```
 
-指令（**仅管理员**）：
+别名只能是单个指令 token；与其他主指令冲突的值会被忽略并写入日志。视频别名还支持 `/别名5` 形式。
+
+`/kkt帮助` 使用两节点合并转发：第一节点是基础操作和参数，第二节点是当前生效的别名列表。平台不支持合并转发时自动降级为两段普通文本。
+
+### 普通生图
 
 ```text
-/kkt额度                     # 查询：分通道今日/累计次数 + 预估费用
-/kkt额度 10                  # 两通道日上限都改为 10
-/kkt额度 main 100            # 只改 main
-/kkt额度 image2 20           # 只改 image2
-/kkt额度 0                   # 两通道关闭日限额
-/kkt重置额度                 # 清零全部通道今日已用（累计 total 保留）
-/kkt重置额度 main            # 只清 main 今日
-/kkt统计                     # 同 /kkt额度 查询
+/hajimi 一只穿宇航服的橘猫站在火星
+/kkt 一只穿宇航服的橘猫站在火星
 ```
 
-费用 = 当前配置单价 × 次数（预估，非上游账单；改单价后展示按新价重算）。  
-运行时限额写入 `channel_quota_limit.json`；不会改 WebUI 配置文件。
+`/hajimi` 和 `/kkt` 使用同一个 `main` 额度桶。
 
-## 指令格式
-
-默认情况下，唤醒词必须带 `/`，不使用 `#` 前缀：
+### Grok 生图
 
 ```text
-/hajimi <提示词>
+/grok 一只猫坐在窗边
+/gk 一只猫坐在窗边
 ```
 
-默认主唤醒词为：
+Grok 支持：
+
+- 纯文生图
+- 当前消息附图
+- 回复图片后编辑
+- 多张参考图
+- @用户头像作为参考图（需开启 `enable_at_avatar`）
+
+### Grok 2K 文生图
 
 ```text
-hajimi
+/grok2 一座雨夜里的未来城市
+/grok2k 一座雨夜里的未来城市
+/gk2 一座雨夜里的未来城市
+/gk2k 一座雨夜里的未来城市
 ```
 
-### 文生图
+`/grok2` 固定请求 `resolution=2k`，只支持文生图。
 
-只发送文字指令：
+如果消息中存在附图、回复图或 @头像，插件会在本地直接拒绝，不请求上游：
 
 ```text
-/hajimi 一只穿宇航服的橘猫，站在火星表面
+/grok2 是 2K 文生图模式，不支持参考图。请使用 /grok 进行图生图。
 ```
 
-插件会将提示词发送给图像模型，并返回生成的图片。
+原因是当前 grok2api Web 图片编辑接口只接受 `resolution=1k`。
 
-### 帮助
+### Grok 视频
 
 ```text
-/hajimi帮助
-/hajimi help
-/hajimi ?
+/grokvideo 一只猫在雨中奔跑
+/grokv 一只猫在雨中奔跑
+/gkv 一只猫在雨中奔跑
+/gv 一只猫在雨中奔跑
 ```
 
-不带提示词时也会返回帮助内容：
+指定本次时长：
 
 ```text
-/hajimi
+/grokvideo 5 一只猫在雨中奔跑
+/grokvideo5 一只猫在雨中奔跑
+/grokv5 一只猫在雨中奔跑
 ```
 
-帮助内容会根据当前配置自动显示主唤醒词、别名、斜杠规则和图片使用方式。
+时长范围是 `1-15` 秒，未指定时使用后台 `video_duration`。
 
-## 图生图和多图用法
-
-### 当前消息同时发送图片和文字
-
-在同一条消息中发送一张图片和指令：
+图生视频：
 
 ```text
-/hajimi 改成水彩画风，保留人物主体
+（附一张图片）/grokvideo 让主体挥手
+（回复一张图片）/grokvideo 让镜头慢慢推进
 ```
 
-插件会将当前消息中的图片和文字一起发送给模型。
+视频每次最多一张参考图作为首帧。多张图片会直接拒绝，不请求上游。
 
-### 引用图片后编辑
+视频流程：
 
-先发送一张图片，然后引用这张图片发送：
+1. 并发检查通过后发送一次猫娘化等待提示。
+2. 创建异步任务并后台轮询。
+3. 完成后下载视频并转成 QQ 兼容格式。
+4. 视频真正发送成功后，再发送生成成功和耗时文案。
+
+生成期间不会持续发送百分比进度消息。
+
+### GIF 分镜
 
 ```text
-/hajimi 删除背景，换成纯白色背景
+/hajimigif 让主角挥手
+/kktgif 把主角做成表情包跳舞
+/hajimigif2 让主角眨眼
+/image2gif 让主角挥手
+/image2gif2 让主角眨眼
 ```
 
-插件会读取引用图片，并使用当前指令作为编辑提示词。
+这些命令是“先生图分镜，再裁切 GIF”，不是视频转 GIF。
 
-### 引用文字后生成图片
+### 视频转 GIF
 
-引用一条纯文字消息，再发送：
+引用一个视频或在当前消息附带一个视频，然后发送：
 
 ```text
-/hajimi
+/kkgif
 ```
 
-被引用的文字会作为 Prompt。引用消息自动附带的 `@原发送者` 会被忽略。
+规则：
 
-### 引用图文消息
+- 每次只能处理一个视频。
+- 视频最长 16 秒，超过会拒绝，不会静默截断。
+- 默认首选最长边 480px、10 FPS、256 色调色板。
+- 输出超过大小上限时自动降级到 360px/8 FPS，再降到 256px/8 FPS。
+- GIF 不包含声音，发送为 GIF 图片。
+- 转换在本机通过 FFmpeg 完成，不调用图片或视频模型。
 
-如果被引用消息同时包含文字和图片：
+### GIF 压缩（表情包风）
+
+引用一个视频或 GIF，或在当前消息附带后发送：
 
 ```text
-原消息：图片 + 把这个人物放到海边
+/kkgifzip
+/kkgifzip1
+/kkgifzip3
+/kkgifzip5
 ```
 
-再发送：
+规则：
+
+- 裸 `/kkgifzip` 与 `/kkgifzip1` 同为第 1 档；数字越大越糊、文件越小。
+- 支持：一个视频，或一个 GIF。
+- 不支持：静态图片（jpg/png 等），会直接提示。
+- 视频最长 16 秒；输出不含声音。
+- 纯本地 FFmpeg，不调用模型。
+
+档位预设：
+
+| 档 | 边长 | FPS | 色数 |
+|----|------|-----|------|
+| 1 | 360 | 10 | 192 |
+| 2 | 280 | 8 | 128 |
+| 3 | 220 | 6 | 96 |
+| 4 | 160 | 5 | 64 |
+| 5 | 120 | 4 | 48 |
+
+输出仍受 `video_gif_max_bytes` 限制；过大时会在档内自动再降一档参数。
+
+对应后台配置：
 
 ```text
-/hajimi 改成夕阳效果
+video_gif_max_duration = 16
+video_gif_max_dimension = 480
+video_gif_fps = 10
+video_gif_max_bytes = 8388608
 ```
 
-实际发送给模型的内容为：
+默认参数：
+
+- 4x4 分镜：16 帧
+- 3x3 分镜：9 帧
+- 单帧：256x256
+- 播放速度：8 FPS
+- 最大文件：8MB
+
+## 图片输入规则
+
+图片来源顺序：
 
 ```text
-Prompt：
-把这个人物放到海边
-改成夕阳效果
-
-参考图片：
-原消息中的图片
+引用消息中的图片
+当前消息中的图片
+@头像（仅无其他图片且 enable_at_avatar=true 时）
 ```
 
-引用文字会放在当前指令之前，引用产生的 `@` 不会进入 Prompt。
+引用图和当前消息图片会合并，不会因为有引用图而丢掉当前图片。
 
-### 引用图片并附带当前新图片
+引用消息文字会加入 Prompt，引用自动产生的 @不会加入 Prompt，也不会自动作为头像目标。
 
-例如：
+### 动图参考帧
+
+后台配置项：
 
 ```text
-用户 A：图片 1
+animated_reference_frame = 首帧
 ```
 
-你引用图片 1，同时在当前消息中发送图片 2 和：
+可选：
+
+- `首帧`：第 1 帧，默认值，适合作为视频首帧。
+- `中间帧`：时间中点附近的帧，适合主体在中途才出现的动图。
+- `末帧`：最后一帧，适合使用动作完成状态。
+
+插件会把 GIF/WebP 抽成普通 PNG，再发送给模型，并在开始生成提示中告知实际帧位置。
+
+## 额度与并发
+
+额度桶：
+
+- `main`：`/hajimi`、`/kkt`
+- `image2`：`/image2`
+- `video`：`/grokvideo`、`/grokv`、`/gkv`、`/gv`
+
+失败请求不计成功次数，成功生成后才记账。
+
+管理员命令：
 
 ```text
-/hajimi 把这两个人对换
+/kkt额度
+/kkt额度 main 100
+/kkt额度 image2 20
+/kkt额度 video 5
+/kkt重置额度
+/kkt重置额度 video
 ```
 
-插件会发送：
+视频并发由后台配置控制：
 
 ```text
-Prompt：把这两个人对换
-参考图片：图片 1 + 图片 2
+video_max_concurrent = 2
+video_max_concurrent_per_user = 1
+video_cooldown_seconds = 60
 ```
 
-引用图片和当前消息图片会合并处理，重复图片会自动去重。
+全局并发满时直接拒绝，不建立无限等待队列。
 
-如果两边都有多张图片，插件会将所有图片按“引用图片在前、当前消息图片在后”的顺序发送。
+## 敏感词审核
 
-## @用户头像
-
-默认不使用 `@用户` 头像：
+默认关闭。开启后适用于各生图和视频提示词：
 
 ```text
-enable_at_avatar = false
+sensitive_filter_enabled = true
 ```
 
-开启后：
+命中时：
+
+- 不请求上游。
+- 不扣额度。
+- 用户只看到通用审核提示。
+- 具体类别和关键词只写入服务端日志。
+
+管理员命令：
 
 ```text
-enable_at_avatar = true
+/kkt审核
+/kkt审核 开
+/kkt审核 关
 ```
 
-当当前消息和引用消息中都没有图片时，可以在指令中 @ 用户，将其头像作为参考图：
+## 失败信息与日志
+
+用户侧只显示简洁错误，例如：
 
 ```text
-@某用户 /hajimi 把头像改成赛博朋克风格
+图片生成失败，请稍后重试。
+视频生成失败，请稍后重试。
+视频已生成，但发送失败，请稍后重试。
 ```
 
-注意：
+上游 HTTP 状态、请求阶段、Key 掩码、任务 ID 和详细异常只写入 AstrBot 日志，不直接展示给用户。
 
-- 如果消息中已有图片，不会额外读取 @ 用户头像。
-- 引用消息时平台自动带上的 @ 不会被当作头像目标。
-- 是否能获取头像取决于当前适配器提供的消息组件和网络环境。
-
-## 唤醒词和别名
-
-### 固定命令
-
-插件固定注册以下两个 AstrBot 命令：
+关键日志前缀：
 
 ```text
-/hajimi 一只猫
-/kkt 一只猫
+[kkt]
+[kkt][webui]
 ```
 
-帮助命令：
+## Grok2API 接口
+
+Grok 生图：
 
 ```text
-/hajimi帮助
-/kkt帮助
+POST /v1/images/generations
+POST /v1/images/edits
 ```
 
-两个命令会出现在 AstrBot 的“管理行为”中。命令必须带 `/` 前缀。
+`/grok` 有参考图时向 `images` 数组提交多张图片；`/grok2` 无参考图时提交 `resolution=2k`。
 
-## 群聊黑名单
-
-在 WebUI 配置 `group_blacklist`，只填写纯数字群号：
+Grok 视频：
 
 ```text
-[123456789, 987654321]
+POST /v1/videos/generations
+GET  /v1/videos/{request_id}
+GET  /v1/videos/{request_id}/content
 ```
 
-黑名单群中的插件指令会被直接忽略：
+视频完成响应中的内网 `127.0.0.1` 媒体地址会自动改写为配置的 API 地址。
 
-- 不返回帮助。
-- 不读取图片。
-- 不调用 API。
-- 不发送错误消息。
+## 常见问题
 
-私聊不受群黑名单影响。
+### WebUI 改了参数但没生效
 
-## 本地敏感词过滤（Sensitive-lexicon）
+保存后在插件管理中重载 `astrbot_plugin_kkt`。连接和生成参数不会要求重启 AstrBot。
 
-默认**关闭**。开启后对 `/kkt` `/hajimi` `/image2` 三通道的提示词做本地关键词拦截：命中则提示「内容审核未通过」，**不请求上游、不扣日配额**。用户侧不展示命中词；日志会记录 `category` 与 `keyword`。
+### `/grok2` 带图失败
 
-### 下载词库（不随插件分发）
+这是预期行为。`/grok2` 只做 2K 文生图，带图请使用 `/grok`。
 
-```bash
-# 推荐放到插件数据目录
-cd /path/to/AstrBot/data/plugin_data/kkt
-git clone https://github.com/konsheng/Sensitive-lexicon.git
-```
+### 视频生成成功但 QQ 不显示
 
-仓库：https://github.com/konsheng/Sensitive-lexicon  
-需要目录内有 `Vocabulary/*.txt`（如 `政治类型.txt`）。
+插件会在发送前转码为 H.264 + AAC + faststart MP4；如果仍失败，查看日志中的 `video direct send` 和 NapCat 日志。
 
-### 相关配置
+### 视频任务很久没有结果
 
-| 配置项 | 默认 | 说明 |
-|---|---|---|
-| `sensitive_filter_enabled` | `false` | WebUI 默认总开关 |
-| `sensitive_lexicon_path` | 空 | 空则用 `data/plugin_data/kkt/Sensitive-lexicon` |
-| `sensitive_categories` | `[]` | 空=全部已映射类别；可多选如 `政治`、`暴恐`、`色情` |
+任务期间不发送百分比消息。检查 `video_timeout`、中转站状态和日志中的 request ID；任务结束后会释放并发槽。
 
-### 指令开关（运行时，仅管理员可改）
+### 如何只测试连接
 
-```text
-/kkt审核              # 查询 → 仅回复「本地审核：开/关」
-/kkt审核 开           # 开启（仅管理员）
-/kkt审核 关           # 关闭（仅管理员）
-```
+打开 KKT Studio，点击对应通道的“测试连接”。测试只访问 health/models，不会生成图片或视频。
 
-群聊**不展示**词条数/类别；详情只在服务端日志。开关写入 `data/plugin_data/kkt/sensitive_filter_enabled.json`，重载仍生效。
+## 版本与兼容
 
-类别与文件对应见 WebUI 配置 hint。建议先只启用 `政治` 观察误杀，再按需加类。
-
-## 全部配置项
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|---|---|---:|---|
-| `group_blacklist` | list | `[]` | 群聊黑名单，填写纯数字群号 |
-| `api_base` | string | `https://newapi.qianqianye.com/v1` | API 基址，不要填写 `/chat/completions` |
-| `api_key` | string | 空 | NewAPI API Key |
-| `model` | string | `gemini-3.1-flash-image` | 图像模型名称 |
-| `temperature` | float | `0.7` | API 请求参数 |
-| `timeout` | int | `180` | API 超时时间，单位秒 |
-| `max_retry` | int | `2` | 网络错误、429、5xx 的重试次数 |
-| `retry_delay` | int | `2` | 重试间隔，单位秒 |
-| `enable_reply_image` | bool | `true` | 是否读取引用消息中的图片 |
-| `enable_at_avatar` | bool | `false` | 是否允许使用 @用户头像 |
-| `cleanup_delay` | int | `15` | 图片发送后清理临时文件的延迟秒数 |
-| `sensitive_filter_enabled` | bool | `false` | 本地敏感词过滤总开关 |
-| `sensitive_lexicon_path` | string | 空 | Sensitive-lexicon 根目录 |
-| `sensitive_categories` | list | `[]` | 启用类别（空=全部） |
-
-## 处理规则总结
-
-### Prompt 来源
-
-```text
-引用消息文字
-    +
-当前 /hajimi 或 /kkt 后面的文字
-```
-
-引用消息中的图片、当前消息中的图片和可选头像不会转换成文字，而是作为多模态图片输入发送。
-
-### 图片来源优先级
-
-```text
-引用消息图片
-    +
-当前消息图片
-    ↓
-如果没有任何图片，并且 enable_at_avatar=true
-    ↓
-@用户头像
-```
-
-引用图片和当前图片会合并，不会因为存在引用图片而丢弃当前图片。
-
-### 自动 @ 的处理
-
-引用消息产生的 `@` 组件会被忽略：
-
-- 不加入 Prompt。
-- 不作为头像目标。
-- 不影响图片收集。
-
-## API 请求格式
-
-插件发送的请求结构为 OpenAI 多模态格式：
-
-```json
-{
-  "model": "gemini-3.1-flash-image",
-  "messages": [
-    {
-      "role": "user",
-      "content": [
-        {
-          "type": "text",
-          "text": "把这两个人对换"
-        },
-        {
-          "type": "image_url",
-          "image_url": {
-            "url": "data:image/jpeg;base64,..."
-          }
-        }
-      ]
-    }
-  ],
-  "temperature": 0.7
-}
-```
-
-请求头：
-
-```text
-Authorization: Bearer <API_KEY>
-Content-Type: application/json
-```
-
-插件会兼容以下常见图片响应形式：
-
-- `choices[0].message.images`
-- `choices[0].message.content` 中的 `image_url`
-- 文本中的 Data URL
-- 文本中的普通图片 URL
-
-## 性能和安全
-
-- 群黑名单在指令解析、图片读取和 API 请求之前判断。
-- 使用异步 `aiohttp`，避免阻塞 AstrBot 事件循环。
-- 图片只在确定需要发送给模型时转换为 Base64。
-- 图片按来源去重，避免重复上传相同图片。
-- 图片结果保存在 AstrBot 数据目录，发送后自动清理。
-- 启动时清理超过 1 小时的残留临时文件。
-- 认证失败不重试，网络错误、429 和 5xx 按配置重试。
-- API Key 不写入日志。
-
-## 当前接口范围
-
-当前版本使用：
-
-```text
-POST /v1/chat/completions
-```
-
-当前主要发送：
-
-```text
-model
-messages
-temperature
-```
-
-`size`、`quality`、`style`、`n`、`response_format` 等参数暂未默认发送。这些参数通常属于 `/images/generations` 或其他图像接口，后续可根据不同模型和接口协议扩展。
+- AstrBot：`>=4.17.0`
+- 当前开发运行时：AstrBot `4.26.8`
+- 支持平台：`aiocqhttp`、`qq_official`、`telegram`、`discord`

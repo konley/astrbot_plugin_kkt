@@ -1,214 +1,511 @@
 {
-  "group_blacklist": {
-    "description": "群聊黑名单",
-    "type": "list",
-    "default": [],
-    "hint": "填写纯数字群号，例如 123456789；黑名单群不会响应插件"
+  "group_settings": {
+    "description": "群聊与基础开关",
+    "type": "object",
+    "items": {
+      "group_blacklist": {
+        "description": "群聊黑名单",
+        "type": "list",
+        "default": [],
+        "hint": "填写纯数字群号；黑名单群不会响应插件。私聊不受影响。"
+      }
+    }
   },
-  "api_base": {
-    "description": "API 基址",
-    "type": "string",
-    "default": "https://newapi.qianqianye.com/v1",
-    "hint": "通常保持默认值，不要填写 /chat/completions"
+  "command_settings": {
+    "description": "指令与别名",
+    "type": "object",
+    "items": {
+      "main_command_aliases": {
+        "description": "主图像别名",
+        "type": "list",
+        "default": ["kkt"],
+        "hint": "主指令固定为 /hajimi；可填写多个别名，支持逗号或换行。"
+      },
+      "image2_command_aliases": {
+        "description": "Image2 别名",
+        "type": "list",
+        "default": [],
+        "hint": "主指令固定为 /image2；可填写多个别名。"
+      },
+      "grok_command_aliases": {
+        "description": "Grok 生图别名",
+        "type": "list",
+        "default": ["gk"],
+        "hint": "主指令固定为 /grok；可填写多个别名。"
+      },
+      "grok2_command_aliases": {
+        "description": "Grok 2K 别名",
+        "type": "list",
+        "default": ["grok2k", "gk2", "gk2k"],
+        "hint": "主指令固定为 /grok2；仅文生图模式。"
+      },
+      "video_command_aliases": {
+        "description": "Grok 视频别名",
+        "type": "list",
+        "default": ["grokv", "gkv", "gv"],
+        "hint": "主指令固定为 /grokvideo；每个别名也支持末尾附 1-15 秒。"
+      },
+      "main_gif_aliases": {
+        "description": "主通道 16 帧 GIF 别名",
+        "type": "list",
+        "default": ["kktgif"],
+        "hint": "主指令为 /hajimigif；可填写多个别名。"
+      },
+      "main_gif2_aliases": {
+        "description": "主通道 9 帧 GIF 别名",
+        "type": "list",
+        "default": [],
+        "hint": "主指令为 /hajimigif2；可填写多个别名。"
+      },
+      "image2_gif_aliases": {
+        "description": "Image2 16 帧 GIF 别名",
+        "type": "list",
+        "default": [],
+        "hint": "主指令为 /image2gif；可填写多个别名。"
+      },
+      "image2_gif2_aliases": {
+        "description": "Image2 9 帧 GIF 别名",
+        "type": "list",
+        "default": [],
+        "hint": "主指令为 /image2gif2；可填写多个别名。"
+      }
+    }
   },
-  "api_key": {
-    "description": "NewAPI API Key（/hajimi /kkt）",
-    "type": "string",
-    "default": "",
-    "hint": "默认通道主密钥；/hajimi 与 /kkt 使用。不会用于 /image2"
+  "main_image_settings": {
+    "description": "主图像通道（/hajimi /kkt）",
+    "type": "object",
+    "items": {
+      "api_base": {
+        "description": "主 API 基址",
+        "type": "string",
+        "default": "https://newapi.qianqianye.com/v1",
+        "hint": "不要填写完整 /chat/completions 路径。"
+      },
+      "api_key": {
+        "description": "主 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "/hajimi 与 /kkt 使用，不会用于 /image2。"
+      },
+      "backup_api_keys": {
+        "description": "备用 API Key 列表",
+        "type": "list",
+        "default": [],
+        "hint": "主 Key 失败后按顺序切换；支持多个 Key。"
+      },
+      "model": {
+        "description": "主图像模型",
+        "type": "string",
+        "default": "gemini-3.1-flash-image",
+        "hint": "/hajimi 与 /kkt 使用的模型名。"
+      }
+    }
   },
-  "backup_api_keys": {
-    "description": "备用 API Key 列表（/hajimi /kkt）",
-    "type": "list",
-    "default": [],
-    "hint": "主 api_key 失败（401/403/429/5xx/无渠道）后按顺序切换；可填多个，自动去重。也可粘贴逗号/换行分隔"
+  "image2_settings": {
+    "description": "Image2 独立通道（/image2）",
+    "type": "object",
+    "items": {
+      "image2_api_key": {
+        "description": "Image2 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "不会回退到主 api_key。"
+      },
+      "image2_backup_api_keys": {
+        "description": "Image2 备用 API Key 列表",
+        "type": "list",
+        "default": [],
+        "hint": "主 Image2 Key 失败后按顺序切换。"
+      },
+      "image2_model": {
+        "description": "Image2 模型",
+        "type": "string",
+        "default": "gpt-image-2",
+        "hint": "/image2 使用的模型名。"
+      },
+      "image2_api_base": {
+        "description": "Image2 API 基址",
+        "type": "string",
+        "default": "",
+        "hint": "留空复用主 API 基址；不要填写完整 /images/generations 路径。"
+      },
+      "image2_api_mode": {
+        "description": "Image2 接口模式",
+        "type": "string",
+        "default": "images",
+        "options": ["images", "chat", "auto"],
+        "hint": "images=走 generations/edits；chat=走 chat/completions；auto=按模型名判断。"
+      },
+      "image2_size": {
+        "description": "Image2 出图尺寸",
+        "type": "string",
+        "default": "1024x1024",
+        "hint": "仅 Image2 Images 模式使用，例如 1024x1024。"
+      }
+    }
   },
-  "model": {
-    "description": "图像模型（/hajimi /kkt）",
-    "type": "string",
-    "default": "gemini-3.1-flash-image",
-    "hint": "默认通道模型，例如 gemini-3.1-flash-image"
+  "grok_image_settings": {
+    "description": "Grok 生图通道（/grok）",
+    "type": "object",
+    "items": {
+      "grok_api_base": {
+        "description": "Grok API 基址",
+        "type": "string",
+        "default": "",
+        "hint": "留空复用主 api_base；视频通道留空时反过来复用本通道。"
+      },
+      "grok_api_key": {
+        "description": "Grok API Key",
+        "type": "string",
+        "default": "",
+        "hint": "留空复用主 api_key；视频通道留空时反过来复用本通道。"
+      },
+      "grok_backup_api_keys": {
+        "description": "Grok 备用 API Key 列表",
+        "type": "list",
+        "default": [],
+        "hint": "留空复用主通道备用 Key；视频备用 Key 留空时复用本列表。"
+      }
+    }
   },
-  "image2_api_key": {
-    "description": "image2 专用 API Key",
-    "type": "string",
-    "default": "",
-    "hint": "仅 /image2 使用的主密钥；不会回退到上面的 api_key"
+  "video_settings": {
+    "description": "Grok 视频通道（/grokvideo）",
+    "type": "object",
+    "items": {
+      "video_api_base": {
+        "description": "视频 API 基址",
+        "type": "string",
+        "default": "",
+        "hint": "留空复用 Grok 生图基址；填写 grok2api 根地址，可带或不带 /v1。"
+      },
+      "video_api_key": {
+        "description": "视频 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "留空复用 Grok 生图 Key；单独填写时使用 grok2api 客户端密钥。"
+      },
+      "video_backup_api_keys": {
+        "description": "视频备用 API Key 列表",
+        "type": "list",
+        "default": [],
+        "hint": "留空复用 Grok 生图备用 Key；创建任务失败时按顺序切换。"
+      },
+      "video_model": {
+        "description": "视频模型",
+        "type": "string",
+        "default": "grok-imagine-video",
+        "hint": "grok2api 视频模型名。"
+      },
+      "video_duration": {
+        "description": "默认视频时长（秒）",
+        "type": "int",
+        "default": 8,
+        "hint": "默认值；指令可临时覆盖，例如 /grokvideo 5 或 /grokv5。范围 1-15。"
+      },
+      "video_aspect_ratio": {
+        "description": "默认视频宽高比",
+        "type": "string",
+        "default": "16:9",
+        "options": ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"],
+        "hint": "带参考图时自动匹配最接近的图片比例。"
+      },
+      "video_resolution": {
+        "description": "视频分辨率",
+        "type": "string",
+        "default": "720p",
+        "options": ["480p", "720p", "1080p"],
+        "hint": "1080p 文件更大、生成和发送更慢。"
+      },
+      "video_poll_interval": {
+        "description": "视频查询间隔（秒）",
+        "type": "int",
+        "default": 3,
+        "hint": "后台轮询间隔；不会向用户发送进度消息。"
+      },
+      "video_timeout": {
+        "description": "视频任务超时（秒）",
+        "type": "int",
+        "default": 600,
+        "hint": "从创建到下载完成的最长等待时间。"
+      },
+      "video_max_concurrent": {
+        "description": "视频全局并发上限",
+        "type": "int",
+        "default": 2,
+        "hint": "满时直接拒绝，不排队。"
+      },
+      "video_max_concurrent_per_user": {
+        "description": "视频每用户并发上限",
+        "type": "int",
+        "default": 1,
+        "hint": "同一用户同时进行的视频任务数。"
+      },
+      "video_cooldown_seconds": {
+        "description": "视频用户冷却（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "0=关闭；管理员免冷却。"
+      },
+      "video_cleanup_delay": {
+        "description": "视频临时文件清理延迟（秒）",
+        "type": "int",
+        "default": 60,
+        "hint": "发送完成后保留临时文件的时间。"
+      },
+      "video_prompt_enhance": {
+        "description": "视频静态提示词增强",
+        "type": "bool",
+        "default": true,
+        "hint": "为 /grokvideo 追加主体、运动、镜头和时序软约束；关闭则原文直传。"
+      },
+      "video_style_prompt": {
+        "description": "视频额外预制提示词",
+        "type": "text",
+        "default": "",
+        "hint": "追加到视频请求的自定义约束；与生图 style_prompt 独立，视频增强关闭时不追加。"
+      }
+    }
   },
-  "image2_backup_api_keys": {
-    "description": "image2 备用 API Key 列表",
-    "type": "list",
-    "default": [],
-    "hint": "仅 /image2：主 image2_api_key 失败后按顺序切换；可填多个，自动去重"
+  "generation_settings": {
+    "description": "请求与重试",
+    "type": "object",
+    "items": {
+      "temperature": {
+        "description": "Temperature",
+        "type": "float",
+        "default": 0.7,
+        "hint": "Chat 图像请求使用；范围 0-2。"
+      },
+      "timeout": {
+        "description": "图片请求超时（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "图片生成请求的最长等待时间。"
+      },
+      "max_retry": {
+        "description": "失败重试次数",
+        "type": "int",
+        "default": 2,
+        "hint": "网络错误、429 和 5xx 重试次数。"
+      },
+      "retry_delay": {
+        "description": "重试间隔（秒）",
+        "type": "int",
+        "default": 2,
+        "hint": "每次重试前等待时间。"
+      }
+    }
   },
-  "image2_model": {
-    "description": "image2 模型",
-    "type": "string",
-    "default": "gpt-image-2",
-    "hint": "/image2 指令使用的模型名，默认 gpt-image-2"
+  "input_behavior_settings": {
+    "description": "图片输入与提示词",
+    "type": "object",
+    "items": {
+      "enable_reply_image": {
+        "description": "启用回复图片",
+        "type": "bool",
+        "default": true,
+        "hint": "读取回复消息中的图片作为参考图。"
+      },
+      "enable_at_avatar": {
+        "description": "启用 @用户头像",
+        "type": "bool",
+        "default": false,
+        "hint": "收集消息中 @用户头像作为参考图。"
+      },
+      "animated_reference_frame": {
+        "description": "动图参考帧",
+        "type": "string",
+        "default": "首帧",
+        "options": ["首帧", "中间帧", "末帧"],
+        "hint": "参考 GIF/WebP 动图时抽取哪一帧作为图片或视频参考。"
+      },
+      "label_images": {
+        "description": "多图顺序标签",
+        "type": "bool",
+        "default": true,
+        "hint": "给多张参考图添加图1、图2标签，帮助模型对应角色。"
+      },
+      "prefer_chinese_text": {
+        "description": "图内文字默认中文",
+        "type": "bool",
+        "default": true,
+        "hint": "要求图内可读文字默认使用简体中文。"
+      },
+      "prefer_cn_locale": {
+        "description": "人物与习惯轻量本地化",
+        "type": "bool",
+        "default": true,
+        "hint": "只作为软约束，用户和参考图优先。"
+      },
+      "style_prompt": {
+        "description": "额外预制提示词",
+        "type": "text",
+        "default": "",
+        "hint": "追加到请求中的风格或约束。"
+      },
+      "reply_with_quote": {
+        "description": "出图时引用原指令",
+        "type": "bool",
+        "default": true,
+        "hint": "生成图片后引用触发指令。"
+      }
+    }
   },
-  "image2_api_base": {
-    "description": "image2 API 基址（可选）",
-    "type": "string",
-    "default": "",
-    "hint": "留空则与 api_base 相同；不要填完整 /images/generations 路径"
+  "reaction_settings": {
+    "description": "消息回应",
+    "type": "object",
+    "items": {
+      "reaction_emoji_enabled": {
+        "description": "触发时表情回应",
+        "type": "bool",
+        "default": true,
+        "hint": "识别指令后点 QQ 表情，不发送文字提示。"
+      },
+      "reaction_emoji_list": {
+        "description": "回应表情 ID 列表",
+        "type": "list",
+        "default": [147],
+        "hint": "空列表=不回应，最多 5 个。"
+      },
+      "reaction_emoji_strategy": {
+        "description": "回应策略",
+        "type": "string",
+        "default": "随机",
+        "options": ["随机", "顺序循环"],
+        "hint": "随机取一个，或按列表依次回应。"
+      }
+    }
   },
-  "image2_api_mode": {
-    "description": "image2 接口模式",
-    "type": "string",
-    "default": "images",
-    "options": ["images", "chat", "auto"],
-    "hint": "images=走 /v1/images/generations|edits（gpt-image-2 推荐）；chat=仍走 chat/completions；auto=按模型名猜测。不影响 /kkt /hajimi"
+  "quota_settings": {
+    "description": "冷却、额度与费用",
+    "type": "object",
+    "items": {
+      "cooldown_seconds": {
+        "description": "普通生图用户冷却（秒）",
+        "type": "int",
+        "default": 15,
+        "hint": "同一用户两次普通生图的最小间隔；0=关闭。"
+      },
+      "daily_quota": {
+        "description": "单日总配额（兼容旧项）",
+        "type": "int",
+        "default": 50,
+        "hint": "仅用于兼容旧配置；优先使用下方分通道额度。"
+      },
+      "daily_quota_main": {
+        "description": "主通道日限额",
+        "type": "int",
+        "default": 50,
+        "hint": "/hajimi、/kkt 共用；0=不限制。"
+      },
+      "daily_quota_image2": {
+        "description": "Image2 日限额",
+        "type": "int",
+        "default": 50,
+        "hint": "仅 /image2；0=不限制。"
+      },
+      "daily_quota_video": {
+        "description": "视频日限额",
+        "type": "int",
+        "default": 10,
+        "hint": "仅 /grokvideo；0=不限制。"
+      },
+      "cost_main_usd": {
+        "description": "主通道预估单价（USD/次）",
+        "type": "float",
+        "default": 0,
+        "hint": "仅管理员额度查询展示。"
+      },
+      "cost_image2_usd": {
+        "description": "Image2 预估单价（USD/次）",
+        "type": "float",
+        "default": 0,
+        "hint": "仅管理员额度查询展示。"
+      },
+      "cost_video_usd": {
+        "description": "视频预估单价（USD/次）",
+        "type": "float",
+        "default": 0,
+        "hint": "仅管理员额度查询展示。"
+      }
+    }
   },
-  "image2_size": {
-    "description": "image2 出图尺寸",
-    "type": "string",
-    "default": "1024x1024",
-    "hint": "仅 image2 images 模式使用，例如 1024x1024；上游不支持时可能忽略"
+  "media_settings": {
+    "description": "GIF 与临时文件",
+    "type": "object",
+    "items": {
+      "cleanup_delay": {
+        "description": "图片临时文件清理延迟（秒）",
+        "type": "int",
+        "default": 15,
+        "hint": "发送图片后延迟删除。"
+      },
+      "gif_frame_size": {
+        "description": "GIF 单帧尺寸",
+        "type": "int",
+        "default": 256,
+        "hint": "建议 256。"
+      },
+      "gif_fps": {
+        "description": "GIF 播放帧率",
+        "type": "int",
+        "default": 8,
+        "hint": "建议 6-10。"
+      },
+      "gif_max_bytes": {
+        "description": "GIF 文件大小上限",
+        "type": "int",
+        "default": 8388608,
+        "hint": "默认 8MB。"
+      },
+      "video_gif_max_duration": {
+        "description": "视频转 GIF 最大时长（秒）",
+        "type": "int",
+        "default": 16,
+        "hint": "固定限制为 1-16 秒；超出直接拒绝。"
+      },
+      "video_gif_max_dimension": {
+        "description": "视频转 GIF 首选尺寸",
+        "type": "int",
+        "default": 480,
+        "hint": "最长边首选 480px，文件过大时自动降到 360px/256px。"
+      },
+      "video_gif_fps": {
+        "description": "视频转 GIF 首选帧率",
+        "type": "int",
+        "default": 10,
+        "hint": "首选 10 FPS，文件过大时自动降级。"
+      },
+      "video_gif_max_bytes": {
+        "description": "视频转 GIF 大小上限",
+        "type": "int",
+        "default": 8388608,
+        "hint": "默认 8MB；输出过大时自动降低尺寸和帧率。"
+      }
+    }
   },
-  "temperature": {
-    "description": "Temperature",
-    "type": "float",
-    "default": 0.7,
-    "hint": "发送给 chat/completions 的 temperature 参数（/kkt 与 image2 chat 模式）"
-  },
-  "timeout": {
-    "description": "请求超时秒数",
-    "type": "int",
-    "default": 180,
-    "hint": "图片生成通常需要几十秒"
-  },
-  "max_retry": {
-    "description": "失败重试次数",
-    "type": "int",
-    "default": 2,
-    "hint": "仅对网络错误、429 和 5xx 重试"
-  },
-  "retry_delay": {
-    "description": "重试间隔秒数",
-    "type": "int",
-    "default": 2,
-    "hint": "429 或服务端错误后的等待时间"
-  },
-  "enable_reply_image": {
-    "description": "启用回复图片编辑",
-    "type": "bool",
-    "default": true,
-    "hint": "回复一张图片并使用 /hajimi 或 /kkt 提示词时，将图片作为参考图"
-  },
-  "enable_at_avatar": {
-    "description": "启用 @用户头像",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后收集消息中全部 @ 用户头像作为参考图，可与引用图/当前图片合并（如：引用底图 + @某人 把主角换成他）。需 QQ/aiocqhttp"
-  },
-  "label_images": {
-    "description": "多图顺序标签",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后按【图1·引用原图】【图2·@头像】交错发送，并把 @xx/图片N 改写成图N，帮助模型理解先后与角色对应"
-  },
-  "prefer_chinese_text": {
-    "description": "图内文字默认中文",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后预制提示词要求气泡/标题/旁白/音效等默认用简体中文；品牌名/专有名词或用户明确要求时可用英文"
-  },
-  "prefer_cn_locale": {
-    "description": "人物/习惯轻量本地化",
-    "type": "bool",
-    "default": true,
-    "hint": "未指定时人物默认东亚华人外貌、画风略偏国漫清爽、日常物件可自然中国向；参考图优先、用户指定优先。不强制中国场景/竖版，尽量少限制发挥"
-  },
-  "style_prompt": {
-    "description": "额外预制提示词",
-    "type": "text",
-    "default": "",
-    "hint": "追加到每次请求的风格/约束（接在内置软约束之后）。例如：二次元、不要水印"
-  },
-  "reply_with_quote": {
-    "description": "出图时引用原指令",
-    "type": "bool",
-    "default": true,
-    "hint": "生成图片后引用回复触发 /kkt 或 /hajimi 的那条消息；关闭则只发图"
-  },
-  "reaction_emoji_enabled": {
-    "description": "触发生图时表情回应",
-    "type": "bool",
-    "default": true,
-    "hint": "识别到指令后对原消息点表情（不是文字回复），提示已开始处理。需 QQ/aiocqhttp，仅群聊"
-  },
-  "reaction_emoji_list": {
-    "description": "回应表情ID列表(0~5个)",
-    "type": "list",
-    "default": [147],
-    "hint": "QQ emoji_id,空列表=不回应,最多5个。常用:棒棒糖=147 OK=124 赞=76 爱心=66。完整列表: https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html"
-  },
-  "reaction_emoji_strategy": {
-    "description": "回应策略",
-    "type": "string",
-    "default": "随机",
-    "options": ["随机", "顺序循环"],
-    "hint": "随机:每次从列表抽1个。顺序循环:按列表依次全部回应,每个间隔0.5s(同一消息多表情)。"
-  },
-  "cooldown_seconds": {
-    "description": "用户冷却秒数(CD)",
-    "type": "int",
-    "default": 15,
-    "hint": "同一用户两次生图的最小间隔，仅对该用户生效；0=关闭。管理员不受 CD 限制"
-  },
-  "daily_quota": {
-    "description": "单日总配额(兼容旧项)",
-    "type": "int",
-    "default": 50,
-    "hint": "兼容旧配置：当 daily_quota_main / daily_quota_image2 未单独填写时，作为两通道默认日上限。0=不限制。优先用下方分通道项"
-  },
-  "daily_quota_main": {
-    "description": "main通道日限额(/kkt|/hajimi)",
-    "type": "int",
-    "default": 50,
-    "hint": "/kkt 与 /hajimi 共用；0=不限制。超出后普通用户不可用，管理员可继续。也可用 /kkt额度 main 100 运行时调整"
-  },
-  "daily_quota_image2": {
-    "description": "image2通道日限额",
-    "type": "int",
-    "default": 50,
-    "hint": "仅 /image2；0=不限制。也可用 /kkt额度 image2 20 运行时调整"
-  },
-  "cost_main_usd": {
-    "description": "main预估单价(USD/次)",
-    "type": "float",
-    "default": 0,
-    "hint": "/kkt|/hajimi 每次成功出图的预估费用，仅管理员查询展示（次数×单价），非上游真实账单。0=不显示金额含义"
-  },
-  "cost_image2_usd": {
-    "description": "image2预估单价(USD/次)",
-    "type": "float",
-    "default": 0,
-    "hint": "/image2 每次成功出图的预估费用，仅管理员查询展示。改价后按「当前单价×累计次数」重算展示"
-  },
-  "cleanup_delay": {
-    "description": "临时文件清理延迟秒数",
-    "type": "int",
-    "default": 15,
-    "hint": "发送图片后等待一段时间再删除本地文件"
-  },
-  "sensitive_filter_enabled": {
-    "description": "本地敏感词过滤",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭。也可运行时用 /kkt审核 开|关（仅管理员，会持久化覆盖本项）。开启后对三通道提示词做本地关键词拦截。词库：https://github.com/konsheng/Sensitive-lexicon 克隆到下方路径（Vocabulary/*.txt）。插件不附带词库。"
-  },
-  "sensitive_lexicon_path": {
-    "description": "Sensitive-lexicon 目录",
-    "type": "string",
-    "default": "",
-    "hint": "留空= data/plugin_data/kkt/Sensitive-lexicon 。下载：git clone https://github.com/konsheng/Sensitive-lexicon.git 到该目录。不要把词库提交进插件仓库。"
-  },
-  "sensitive_categories": {
-    "description": "启用的词库类别(可多选)",
-    "type": "list",
-    "default": [],
-    "hint": "空列表=加载 Vocabulary 下全部已映射类别。可填：政治、反动、贪腐、暴恐、涉枪涉爆、色情、广告、民生、COVID-19、GFW、非法网址、补充、其他、新思想、网易综合、腾讯综合。建议先只开「政治」观察误杀。"
+  "moderation_settings": {
+    "description": "本地敏感词审核",
+    "type": "object",
+    "items": {
+      "sensitive_filter_enabled": {
+        "description": "启用本地敏感词过滤",
+        "type": "bool",
+        "default": false,
+        "hint": "命中时不请求上游、不扣额度。也可用 /kkt审核 开关。"
+      },
+      "sensitive_lexicon_path": {
+        "description": "Sensitive-lexicon 目录",
+        "type": "string",
+        "default": "",
+        "hint": "留空使用 data/plugin_data/kkt/Sensitive-lexicon。"
+      },
+      "sensitive_categories": {
+        "description": "启用的词库类别",
+        "type": "list",
+        "default": [],
+        "hint": "空列表加载全部已映射类别。"
+      }
+    }
   }
 }

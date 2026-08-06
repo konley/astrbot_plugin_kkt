@@ -1,6 +1,6 @@
 name: astrbot_plugin_kkt
-desc: 康康图：OpenAI 兼容生图/修图，分通道额度与预估费用，多图/引用/群黑名单
-version: 0.7.0
+desc: 康康图：多通道生图/修图、Grok 2K、视频转 GIF、多图参考、GIF 分镜与 grok2api 视频，并提供 KKT Studio WebUI 控制台
+version: 0.18.0
 author: konley
 display_name: 康康图
 repo: https://github.com/konley/astrbot_plugin_kkt
@@ -10,3 +10,7 @@ support_platforms:
   - telegram
   - discord
 astrbot_version: ">=4.17.0"
+pages:
+  - name: dashboard
+    title: KKT Studio 控制台
+    entry_file: index.html

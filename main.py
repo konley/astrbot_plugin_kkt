@@ -2,55 +2,352 @@
 
 import asyncio
 import base64
+import io
 import json
 import os
 import re
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from random import choice
+from typing import ClassVar
 from urllib.parse import urlparse
 
 import aiohttp
-
-from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
 import astrbot.api.message_components as Comp
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.command import GreedyStr
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from PIL import Image
+
+try:
+    from .video_client import (
+        GrokVideoClient,
+        GrokVideoError,
+        normalize_api_base,
+        resolve_media_url,
+    )
+    from .web_api import KktWebApiMixin
+except ImportError:  # pragma: no cover - flat `import main` in offline tests
+    from video_client import (  # type: ignore
+        GrokVideoClient,
+        GrokVideoError,
+        normalize_api_base,
+        resolve_media_url,
+    )
+    from web_api import KktWebApiMixin  # type: ignore
 
 
-def build_help_text() -> str:
-    """Build the help text for the fixed image commands."""
+_COMMAND_CANONICALS = {
+    "main": "hajimi",
+    "image2": "image2",
+    "grok": "grok",
+    "grok2": "grok2",
+    "video": "grokvideo",
+    "main_gif": "hajimigif",
+    "main_gif2": "hajimigif2",
+    "image2_gif": "image2gif",
+    "image2_gif2": "image2gif2",
+}
+
+_DEFAULT_COMMAND_ALIASES = {
+    "main": ["kkt"],
+    "image2": [],
+    "grok": ["gk"],
+    "grok2": ["grok2k", "gk2", "gk2k"],
+    "video": ["grokv", "gkv", "gv"],
+    "main_gif": ["kktgif"],
+    "main_gif2": [],
+    "image2_gif": [],
+    "image2_gif2": [],
+}
+
+_DEFAULT_HELP_ALIASES = {
+    "hajimi帮助",
+    "image2帮助",
+    "grok帮助",
+    "grok2帮助",
+    "grokvideo帮助",
+    "kkthelp",
+    "hajimihelp",
+    "image2help",
+    "grokhelp",
+    "grok2help",
+    "grokvideohelp",
+}
+
+_DEFAULT_ADMIN_COMMAND_NAMES = {
+    "quota": [
+        "kkt额度",
+        "hajimi额度",
+        "image2额度",
+        "kktquota",
+        "hajimiquota",
+        "image2quota",
+        "kkt限额",
+        "hajimi限额",
+        "image2限额",
+        "kkt配额",
+        "hajimi配额",
+        "image2配额",
+        "kkt统计",
+        "hajimi统计",
+        "image2统计",
+    ],
+    "reset": [
+        "kkt重置额度",
+        "hajimi重置额度",
+        "image2重置额度",
+        "kktresetquota",
+        "hajimiresetquota",
+        "image2resetquota",
+        "kkt清零额度",
+        "hajimi清零额度",
+        "image2清零额度",
+    ],
+    "moderation": [
+        "kkt审核",
+        "hajimi审核",
+        "image2审核",
+        "kkt过滤",
+        "hajimi过滤",
+        "image2过滤",
+        "kktsensitive",
+        "hajimisensitive",
+        "image2sensitive",
+    ],
+    "help": ["kkt帮助", *_DEFAULT_HELP_ALIASES],
+}
+
+
+def _expand_video_aliases(names: list[str] | set[str]) -> set[str]:
+    """Add the compact ``alias5`` duration spelling used by video commands."""
+    expanded = {str(name).strip() for name in names if str(name).strip()}
+    expanded.update(
+        f"{name}{duration}"
+        for name in list(expanded)
+        for duration in range(100)
+    )
+    return expanded
+
+
+_DEFAULT_VIDEO_FILTER_ALIASES = _expand_video_aliases(_DEFAULT_COMMAND_ALIASES["video"])
+
+
+def _format_command_names(names: list[str] | tuple[str, ...]) -> str:
+    return "|".join(f"/{name}" for name in names if str(name).strip())
+
+
+def _default_help_groups() -> dict[str, dict[str, object]]:
+    groups = {
+        "main": {
+            "label": "主图像",
+            "names": [_COMMAND_CANONICALS["main"], *_DEFAULT_COMMAND_ALIASES["main"]],
+            "description": "文生图、修图、多图参考和引用图编辑",
+        },
+        "image2": {
+            "label": "Image2",
+            "names": [_COMMAND_CANONICALS["image2"]],
+            "description": "独立 Image2 通道；Images 模式最多一张参考图",
+        },
+        "grok": {
+            "label": "Grok 生图",
+            "names": [_COMMAND_CANONICALS["grok"], *_DEFAULT_COMMAND_ALIASES["grok"]],
+            "description": "Grok Images 文生图/图生图，支持多图参考",
+        },
+        "grok2": {
+            "label": "Grok 2K",
+            "names": [_COMMAND_CANONICALS["grok2"], *_DEFAULT_COMMAND_ALIASES["grok2"]],
+            "description": "Grok 2K 文生图，不接受参考图",
+        },
+        "video": {
+            "label": "Grok 视频",
+            "names": [_COMMAND_CANONICALS["video"], *_DEFAULT_COMMAND_ALIASES["video"]],
+            "description": "文生/图生视频；可在指令中写 1-15 秒",
+        },
+    }
+    groups.update(
+        {
+            "admin_quota": {
+                "label": "额度",
+                "names": _DEFAULT_ADMIN_COMMAND_NAMES["quota"],
+                "description": "管理员查询或设置三条通道日配额。",
+            },
+            "admin_reset": {
+                "label": "重置额度",
+                "names": _DEFAULT_ADMIN_COMMAND_NAMES["reset"],
+                "description": "管理员清零今日已用次数，累计次数保留。",
+            },
+            "admin_moderation": {
+                "label": "审核",
+                "names": _DEFAULT_ADMIN_COMMAND_NAMES["moderation"],
+                "description": "查询或切换本地敏感词审核。",
+            },
+            "help": {
+                "label": "帮助",
+                "names": _DEFAULT_ADMIN_COMMAND_NAMES["help"],
+                "description": "显示当前全部 canonical 指令和别名。",
+            },
+        }
+    )
+    return groups
+
+
+def build_basic_help_text(
+    command_groups: dict[str, dict[str, object]] | None = None,
+) -> str:
+    """Build the short, canonical-only help section."""
+    groups = command_groups or _default_help_groups()
+    lines = ["康康图 · 基础操作"]
+    descriptions = {
+        "main": "文生图、修图、多图参考、引用图和 @头像",
+        "image2": "独立通道；Images 模式最多一张参考图",
+        "grok": "Grok Images 文生图/图生图，支持多图",
+        "grok2": "Grok 2K 文生图，仅文字提示词",
+        "video": "文生/图生视频；支持 1-15 秒和一张首帧",
+    }
+    for key in ("main", "image2", "grok", "grok2", "video"):
+        item = groups.get(key) or {}
+        names = [str(name) for name in item.get("names", [])]
+        if not names:
+            continue
+        lines.append(
+            f"{item.get('label') or key}：/{names[0]} <提示词>（{descriptions[key]}）"
+        )
+    lines.append(
+        "GIF 分镜：/hajimigif（16帧） /hajimigif2（9帧） "
+        "/image2gif（16帧） /image2gif2（9帧）；视频转 GIF：/kkgif；"
+        "压 GIF：/kkgifzip1-5"
+    )
+    lines.append(
+        "管理：/kkt额度 [main|image2|video] [数量]；/kkt重置额度；"
+        "/kkt审核 开|关；帮助：/kkt帮助"
+    )
+    return "\n".join(lines)
+
+
+def build_alias_help_text(
+    command_groups: dict[str, dict[str, object]] | None = None,
+) -> str:
+    """Build the alias-only help section for the second forward node."""
+    groups = command_groups or _default_help_groups()
+    lines = ["康康图 · 当前别名"]
+    for key in (
+        "main",
+        "image2",
+        "grok",
+        "grok2",
+        "video",
+        "main_gif",
+        "main_gif2",
+        "image2_gif",
+        "image2_gif2",
+        "admin_quota",
+        "admin_reset",
+        "admin_moderation",
+        "help",
+    ):
+        item = groups.get(key) or {}
+        names = [str(name) for name in item.get("names", [])]
+        if not names:
+            continue
+        primary = f"/{names[0]}"
+        aliases = " ".join(f"/{name}" for name in names[1:]) or "（无）"
+        lines.append(f"{item.get('label') or key} {primary}：{aliases}")
+    lines.append("视频别名均支持 /别名5 这种紧凑时长写法（1-15 秒）。")
+    return "\n".join(lines)
+
+
+def build_help_text(command_groups: dict[str, dict[str, object]] | None = None) -> str:
+    """Backward-compatible short help text; aliases are sent separately."""
+    return build_basic_help_text(command_groups)
+
+
+def build_gif_help_text(command_groups: dict[str, dict[str, object]] | None = None) -> str:
+    """Build the GIF help text, including configured aliases."""
+    groups = command_groups or _default_help_groups()
+
+    def names(key: str, fallback: list[str]) -> list[str]:
+        item = groups.get(key) or {}
+        return [str(name) for name in item.get("names", [])] or fallback
+
     return (
-        "康康图\n"
-        "用法：/kkt|/hajimi|/image2 <提示词>\n"
-        "回复图可编辑；image2 仅 1 张参考图\n"
-        "额度：/kkt额度（管理员）；审核：/kkt审核"
+        "康康动图\n"
+        f"主通道 16 帧：{_format_command_names(names('main_gif', ['hajimigif', 'kktgif']))}\n"
+        f"主通道 9 帧：{_format_command_names(names('main_gif2', ['hajimigif2']))}\n"
+        f"Image2 16/9 帧：{_format_command_names(names('image2_gif', ['image2gif']))} / "
+        f"{_format_command_names(names('image2_gif2', ['image2gif2']))}\n"
+        "视频转 GIF：引用或附带一个视频后使用 /kkgif\n"
+        "压缩表情包：/kkgifzip 或 /kkgifzip1-5（视频或 GIF；数字越大越糊越小；静态图不支持）\n"
+        "每个分镜指令都支持提示词；无提示词时由模型选择简单循环动作。"
+    )
+
+
+def build_video_help_text(video_names: list[str] | None = None) -> str:
+    """Build the help text for the canonical Grok video command."""
+    names = video_names or ["grokvideo", "grokv", "gkv", "gv"]
+    command_text = _format_command_names(names)
+    return (
+        "康康视频（grok2api）\n"
+        f"用法：{command_text} <提示词>\n"
+        f"图生：附图或回复图后使用 {command_text.split('|', 1)[0]} [提示词]\n"
+        "仅支持 1 张参考图；可写 1-15 秒，如 /grokvideo 5 猫在雨中奔跑\n"
+        "视频增强、时长、比例、分辨率和并发在插件配置中调整\n"
+        "额度：/kkt额度 video（管理员）"
     )
 
 
 @register(
     "astrbot_plugin_kkt",
     "konley",
-    "调用 NewAPI 生成或编辑图片",
-    "0.7.0",
+    "调用 NewAPI 生图/修图，并对接 grok2api 视频",
+    "0.18.0",
 )
-class KktImagePlugin(Star):
+class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
 
-    # 计费/限额通道：kkt+hajimi 共用 main；image2 独立
+    _GROK_IMAGE_MODEL = "grok-imagine-image-quality"
+
+    # 计费/限额通道：kkt+hajimi 共用 main；image2 / video 独立
     _CHANNEL_MAIN = "main"
     _CHANNEL_IMAGE2 = "image2"
-    _CHANNELS = (_CHANNEL_MAIN, _CHANNEL_IMAGE2)
-    _CHANNEL_LABELS = {
+    _CHANNEL_VIDEO = "video"
+    _CHANNELS = (_CHANNEL_MAIN, _CHANNEL_IMAGE2, _CHANNEL_VIDEO)
+    _CHANNEL_LABELS: ClassVar[dict[str, str]] = {
         "main": "/hajimi",
         "image2": "/image2",
+        "video": "/grokvideo",
     }
+    _COMMAND_CANONICALS: ClassVar[dict[str, str]] = _COMMAND_CANONICALS
+    _DEFAULT_COMMAND_ALIASES: ClassVar[dict[str, list[str]]] = _DEFAULT_COMMAND_ALIASES
+    _COMMAND_ALIAS_FIELDS: ClassVar[dict[str, str]] = {
+        "main": "main_command_aliases",
+        "image2": "image2_command_aliases",
+        "grok": "grok_command_aliases",
+        "grok2": "grok2_command_aliases",
+        "video": "video_command_aliases",
+        "main_gif": "main_gif_aliases",
+        "main_gif2": "main_gif2_aliases",
+        "image2_gif": "image2_gif_aliases",
+        "image2_gif2": "image2_gif2_aliases",
+    }
+    _COMMAND_HANDLER_NAMES: ClassVar[dict[str, str]] = {
+        "main": "handle_hajimi",
+        "image2": "handle_image2",
+        "grok": "handle_grok",
+        "grok2": "handle_grok2",
+        "video": "handle_grokv",
+        "main_gif": "handle_hajimigif",
+        "main_gif2": "handle_hajimigif2",
+        "image2_gif": "handle_image2gif",
+        "image2_gif2": "handle_image2gif2",
+    }
+    _HELP_HANDLER_NAME = "handle_help"
 
     # Sensitive-lexicon Vocabulary 文件名 → WebUI 可选类别名
-    _LEXICON_FILE_TO_CATEGORY: dict[str, str] = {
+    _LEXICON_FILE_TO_CATEGORY: ClassVar[dict[str, str]] = {
         "政治类型.txt": "政治",
         "反动词库.txt": "反动",
         "贪腐词库.txt": "贪腐",
@@ -73,8 +370,20 @@ class KktImagePlugin(Star):
 
     # 匹配指令名后的参数；支持 /kkt帮助、/image2 help 等
     _CMD_ARG_RE = re.compile(
-        r"^/?(?:hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
+        r"^/?(?:kkgifzip[1-5]?|kkgif|grokvideo\d+|grokv\d+|gkv\d+|gv\d+|grokvideo|grokv|gkv|gv|grok2k|gk2k|gk2|grok2|grok|gk|image2gif2|image2gif|hajimigif2|hajimigif|kktgif|hajimi|kkt|image2)(?:帮助|help|\?)?(?:\s+|$)(.*)$",
         re.IGNORECASE | re.DOTALL,
+    )
+    # /kkgifzip 五档：边长 / fps / 色数（越大档越糊越小）
+    _KKGIFZIP_PRESETS: ClassVar[dict[int, dict[str, int]]] = {
+        1: {"dimension": 360, "fps": 10, "colors": 192},
+        2: {"dimension": 280, "fps": 8, "colors": 128},
+        3: {"dimension": 220, "fps": 6, "colors": 96},
+        4: {"dimension": 160, "fps": 5, "colors": 64},
+        5: {"dimension": 120, "fps": 4, "colors": 48},
+    }
+    _KKGIFZIP_LEVEL_RE = re.compile(
+        r"^/?kkgifzip([1-5])?(?:帮助|help|\?)?$",
+        re.IGNORECASE,
     )
     # AstrBot 把 At 序列化成 @昵称 或 @昵称(QQ号) 时用于剔除
     _AT_TOKEN_RE = re.compile(
@@ -89,7 +398,11 @@ class KktImagePlugin(Star):
 
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
-        config = config or {}
+        self.config = config or {}
+        config = self._flatten_plugin_config(self.config)
+        self._command_aliases = self._load_command_aliases(config)
+        self._command_alias_map = self._build_command_alias_map()
+        self._apply_configured_command_aliases()
         self.group_blacklist = self._parse_group_ids(config.get("group_blacklist", []))
         self.api_base = str(
             config.get("api_base", "https://newapi.qianqianye.com/v1")
@@ -117,6 +430,79 @@ class KktImagePlugin(Star):
         mode = str(config.get("image2_api_mode", "images") or "images").strip().lower()
         self.image2_api_mode = mode if mode in {"images", "chat", "auto"} else "images"
         self.image2_size = str(config.get("image2_size", "1024x1024") or "1024x1024").strip()
+        # /grokvideo：默认复用 Grok 生图通道；填写视频字段即可单独覆盖。
+        configured_video_base = normalize_api_base(
+            str(config.get("video_api_base", "") or "").strip()
+        )
+        configured_video_key = str(config.get("video_api_key", "") or "").strip()
+        configured_video_backups = self._parse_secret_list(
+            config.get("video_backup_api_keys", [])
+        )
+        self.video_model = str(
+            config.get("video_model", "Web/grok-imagine-video") or "Web/grok-imagine-video"
+        ).strip()
+        self.video_duration = max(1, min(15, int(config.get("video_duration", 8) or 8)))
+        ar = str(config.get("video_aspect_ratio", "16:9") or "16:9").strip()
+        self.video_aspect_ratio = (
+            ar
+            if ar in {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
+            else "16:9"
+        )
+        res = str(config.get("video_resolution", "720p") or "720p").strip().lower()
+        self.video_resolution = res if res in {"480p", "720p", "1080p"} else "720p"
+        self.video_poll_interval = max(1, min(30, int(config.get("video_poll_interval", 3) or 3)))
+        self.video_timeout = max(60, min(7200, int(config.get("video_timeout", 600) or 600)))
+        self.video_max_concurrent = max(
+            1, min(20, int(config.get("video_max_concurrent", 2) or 2))
+        )
+        self.video_max_concurrent_per_user = max(
+            1, min(5, int(config.get("video_max_concurrent_per_user", 1) or 1))
+        )
+        self.video_cooldown_seconds = max(
+            0, int(config.get("video_cooldown_seconds", 60) or 0)
+        )
+        self.cost_video_usd = max(0.0, float(config.get("cost_video_usd", 0) or 0))
+        self.video_cleanup_delay = max(
+            5, int(config.get("video_cleanup_delay", 60) or 60)
+        )
+        # /grokv 静态提示词前缀（与生图 style_prompt 分离）
+        self.video_prompt_enhance = bool(config.get("video_prompt_enhance", True))
+        self.video_style_prompt = str(
+            config.get("video_style_prompt", "") or ""
+        ).strip()
+        frame_mode = str(
+            config.get("animated_reference_frame", "首帧") or "首帧"
+        ).strip()
+        self.animated_reference_frame = (
+            frame_mode if frame_mode in {"首帧", "中间帧", "末帧"} else "首帧"
+        )
+        # /grok 生图优先使用自身配置，留空时复用已配置的视频 Grok 通道，最后才回退主图像通道。
+        grok_base = str(config.get("grok_api_base", "") or "").strip()
+        self.grok_api_base = (
+            normalize_api_base(grok_base)
+            or configured_video_base
+            or normalize_api_base(self.api_base)
+            or self.api_base
+        )
+        self.grok_api_key = (
+            str(config.get("grok_api_key", "") or "").strip()
+            or configured_video_key
+            or self.api_key
+        )
+        configured_grok_backups = self._parse_secret_list(
+            config.get("grok_backup_api_keys", [])
+        )
+        self.grok_backup_api_keys = (
+            configured_grok_backups
+            or list(configured_video_backups)
+            or list(self.backup_api_keys)
+        )
+        # 视频通道的地址、Key 和备用 Key 留空时复用 Grok 生图通道。
+        self.video_api_base = configured_video_base or self.grok_api_base
+        self.video_api_key = configured_video_key or self.grok_api_key
+        self.video_backup_api_keys = configured_video_backups or list(
+            self.grok_backup_api_keys
+        )
         self.temperature = max(0.0, min(2.0, float(config.get("temperature", 0.7))))
         self.timeout = max(10, int(config.get("timeout", 180)))
         self.max_retry = max(0, min(5, int(config.get("max_retry", 2))))
@@ -171,12 +557,16 @@ class KktImagePlugin(Star):
         legacy_quota = max(0, int(config.get("daily_quota", 50)))
         main_cfg = config.get("daily_quota_main", None)
         image2_cfg = config.get("daily_quota_image2", None)
+        video_cfg = config.get("daily_quota_video", None)
         self._daily_quota_config_defaults: dict[str, int] = {
             self._CHANNEL_MAIN: (
                 max(0, int(main_cfg)) if main_cfg is not None else legacy_quota
             ),
             self._CHANNEL_IMAGE2: (
                 max(0, int(image2_cfg)) if image2_cfg is not None else legacy_quota
+            ),
+            self._CHANNEL_VIDEO: (
+                max(0, int(video_cfg)) if video_cfg is not None else 10
             ),
         }
         # 预估单价 USD/次（仅展示，非上游真实账单）
@@ -189,6 +579,8 @@ class KktImagePlugin(Star):
         self.quota_path = self.temp_dir / "daily_quota.json"
         self.quota_limit_override_path = self.temp_dir / "daily_quota_limit.json"
         self.usage_path = self.temp_dir / "usage.json"
+        self.task_log_path = self.temp_dir / "task_log.json"
+        self._task_logs = self._load_task_logs()
         self.channel_limit_override_path = self.temp_dir / "channel_quota_limit.json"
         # 本地 Sensitive-lexicon 前置审核（默认关；词库不随插件分发）
         # WebUI 为默认值；管理员指令可 runtime 覆盖并持久化
@@ -207,61 +599,412 @@ class KktImagePlugin(Star):
         self.sensitive_categories = self._parse_category_list(
             config.get("sensitive_categories", [])
         )
-        # 内存：sender_id -> 上次成功触发生图的 monotonic 时间
+        # 内存：sender_id -> 上次成功触发的 monotonic 时间
         self._user_last_call: dict[str, float] = {}
+        self._video_user_last_call: dict[str, float] = {}
+        self._video_user_inflight: dict[str, int] = {}
+        self._video_global_inflight = 0
+        self._video_slot_lock = asyncio.Lock()
         self._quota_lock = asyncio.Lock()
         self.channel_limits = self._load_channel_limits()
         # 兼容旧代码/测试：daily_quota ≈ main 通道日限
         self.daily_quota = self.channel_limits[self._CHANNEL_MAIN]
-        self._help_text = build_help_text()
+        command_groups = self._command_help_groups()
+        self._help_text = build_help_text(command_groups)
+        self._gif_help_text = build_gif_help_text(command_groups)
+        self._video_help_text = build_video_help_text(
+            self._command_names_for_key("video")
+        )
+        self.gif_frame_size = max(
+            128, min(512, int(config.get("gif_frame_size", 256)))
+        )
+        self.gif_fps = max(1, min(20, int(config.get("gif_fps", 8))))
+        self.gif_max_bytes = max(
+            256 * 1024,
+            min(15 * 1024 * 1024, int(config.get("gif_max_bytes", 8 * 1024 * 1024))),
+        )
+        self.video_gif_max_duration = max(
+            1, min(16, int(config.get("video_gif_max_duration", 16) or 16))
+        )
+        self.video_gif_max_dimension = max(
+            256, min(640, int(config.get("video_gif_max_dimension", 480) or 480))
+        )
+        self.video_gif_fps = max(
+            5, min(15, int(config.get("video_gif_fps", 10) or 10))
+        )
+        self.video_gif_max_bytes = max(
+            512 * 1024,
+            min(15 * 1024 * 1024, int(config.get("video_gif_max_bytes", 8 * 1024 * 1024) or 8 * 1024 * 1024)),
+        )
         # category -> sorted words (long first)；开启时加载
         self._sensitive_words_by_cat: dict[str, list[str]] = {}
         self._sensitive_word_count = 0
         self.sensitive_filter_enabled = self._load_sensitive_filter_enabled()
         if self.sensitive_filter_enabled:
             self._load_sensitive_lexicon()
+        video_keys = self._build_key_chain(
+            self.video_api_key, self.video_backup_api_keys
+        )
         logger.info(
-            "[kkt] 插件已加载: commands=/hajimi,/kkt,/image2 blacklist_count=%d "
-            "model=%s image2_model=%s image2_key=%s main_keys=%d image2_keys=%d "
+            "[kkt] 插件已加载: commands=/hajimi,/image2,/grok,/grok2,/grokvideo,/kkgif,/kkgifzip "
+            "blacklist_count=%d model=%s grok_model=%s image2_model=%s image2_key=%s "
+            "main_keys=%d grok_keys=%d image2_keys=%d video_keys=%d "
             "endpoint=%s image2_mode=%s image2_size=%s "
+            "video_base=%s video_model=%s video_dur=%ds video_ar=%s video_res=%s "
+            "video_max_concurrent=%d video_per_user=%d video_cd=%ds video_timeout=%ds "
             "reply_with_quote=%s reaction_enabled=%s reaction_count=%d "
-            "cooldown=%ds quota_main=%d quota_image2=%d "
-            "cost_main=$%.4f cost_image2=$%.4f "
+            "cooldown=%ds quota_main=%d quota_image2=%d quota_video=%d "
+            "cost_main=$%.4f cost_image2=$%.4f cost_video=$%.4f "
             "enable_at_avatar=%s label_images=%s "
             "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d "
+            "video_prompt_enhance=%s video_style_prompt_len=%d "
             "sensitive_filter=%s sensitive_words=%d sensitive_cats=%s lexicon=%s",
             len(self.group_blacklist),
             self.model,
+            self._GROK_IMAGE_MODEL,
             self.image2_model,
             "set" if self.image2_api_key else "missing",
             len(self._build_key_chain(self.api_key, self.backup_api_keys)),
+            len(self._build_key_chain(self.grok_api_key, self.grok_backup_api_keys)),
             len(
                 self._build_key_chain(
                     self.image2_api_key, self.image2_backup_api_keys
                 )
             ),
+            len(video_keys),
             f"{self.api_base}/chat/completions",
             self.image2_api_mode,
             self.image2_size,
+            self.video_api_base or "(unset)",
+            self.video_model,
+            self.video_duration,
+            self.video_aspect_ratio,
+            self.video_resolution,
+            self.video_max_concurrent,
+            self.video_max_concurrent_per_user,
+            self.video_cooldown_seconds,
+            self.video_timeout,
             self.reply_with_quote,
             self.reaction_emoji_enabled,
             len(self.reaction_emoji_list),
             self.cooldown_seconds,
             self.channel_limits[self._CHANNEL_MAIN],
             self.channel_limits[self._CHANNEL_IMAGE2],
+            self.channel_limits.get(self._CHANNEL_VIDEO, 0),
             self.cost_main_usd,
             self.cost_image2_usd,
+            self.cost_video_usd,
             self.enable_at_avatar,
             self.label_images,
             self.prefer_chinese_text,
             self.prefer_cn_locale,
             len(self.style_prompt),
+            self.video_prompt_enhance,
+            len(self.video_style_prompt),
             self.sensitive_filter_enabled,
             self._sensitive_word_count,
             sorted(self._sensitive_words_by_cat.keys()) or "(none)",
             str(self.sensitive_lexicon_path),
         )
         self._cleanup_stale_files()
+        self._register_webui_apis()
+
+    @staticmethod
+    def _flatten_plugin_config(config: dict) -> dict:
+        """Accept grouped WebUI config while keeping flat config compatibility."""
+        flattened: dict = {}
+        for key, value in config.items():
+            if isinstance(value, dict):
+                flattened.update(value)
+            else:
+                flattened[key] = value
+        return flattened
+
+    @classmethod
+    def _parse_command_alias_values(cls, value) -> list[str]:
+        """Parse a WebUI alias list into valid single-token command names."""
+        result: list[str] = []
+        seen: set[str] = set()
+        for raw in cls._parse_secret_list(value):
+            name = str(raw or "").strip().lstrip("/")
+            if not name or not re.fullmatch(r"[\w\u4e00-\u9fff-]+", name, re.UNICODE):
+                continue
+            folded = name.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            result.append(name)
+        return result
+
+    @classmethod
+    def _load_command_aliases(cls, config: dict) -> dict[str, list[str]]:
+        """Merge built-in aliases with user aliases while avoiding collisions."""
+        aliases: dict[str, list[str]] = {}
+        canonical_names = {
+            str(name).casefold() for name in cls._COMMAND_CANONICALS.values()
+        }
+        used = set(canonical_names)
+        ordered_keys = tuple(cls._COMMAND_ALIAS_FIELDS)
+        for key in ordered_keys:
+            candidates = [
+                *cls._DEFAULT_COMMAND_ALIASES.get(key, []),
+                *cls._parse_command_alias_values(
+                    config.get(cls._COMMAND_ALIAS_FIELDS[key], [])
+                ),
+            ]
+            current_canonical = cls._COMMAND_CANONICALS[key].casefold()
+            selected: list[str] = []
+            for alias in candidates:
+                folded = alias.casefold()
+                if folded == current_canonical or folded in used:
+                    if folded not in used:
+                        used.add(folded)
+                    continue
+                selected.append(alias)
+                used.add(folded)
+            aliases[key] = selected
+        return aliases
+
+    def _build_command_alias_map(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for key, canonical in self._COMMAND_CANONICALS.items():
+            names = [canonical, *self._command_aliases.get(key, [])]
+            for name in names:
+                mapping[name.casefold()] = key
+            if key == "video":
+                for name in names:
+                    for duration in range(100):
+                        mapping[f"{name}{duration}".casefold()] = key
+        mapping["kkgif"] = "kkgif"
+        mapping["kkgifzip"] = "kkgifzip"
+        for level in range(1, 6):
+            mapping[f"kkgifzip{level}"] = "kkgifzip"
+        return mapping
+
+    def _command_names_for_key(
+        self, key: str, *, include_duration_aliases: bool = False
+    ) -> list[str]:
+        canonical = self._COMMAND_CANONICALS[key]
+        names = [canonical, *self._command_aliases.get(key, [])]
+        if include_duration_aliases and key == "video":
+            names.extend(
+                f"{name}{duration}"
+                for name in names[:]
+                for duration in range(100)
+            )
+        return list(dict.fromkeys(names))
+
+    def _kkgifzip_command_names(self) -> list[str]:
+        return ["kkgifzip", *[f"kkgifzip{level}" for level in range(1, 6)]]
+
+    def _command_names_for_parser(self) -> list[str]:
+        names: list[str] = ["kkgif", *self._kkgifzip_command_names()]
+        for key in self._COMMAND_CANONICALS:
+            names.extend(
+                self._command_names_for_key(
+                    key, include_duration_aliases=key == "video"
+                )
+            )
+        return list(dict.fromkeys(names))
+
+    def _command_help_groups(self) -> dict[str, dict[str, object]]:
+        return {
+            "main": {
+                "label": "主图像",
+                "names": self._command_names_for_key("main"),
+                "description": "文生图、修图、多图参考和引用图编辑",
+            },
+            "image2": {
+                "label": "Image2",
+                "names": self._command_names_for_key("image2"),
+                "description": "独立通道；Images 模式最多一张参考图",
+            },
+            "grok": {
+                "label": "Grok 生图",
+                "names": self._command_names_for_key("grok"),
+                "description": "Grok Images 文生图/图生图，支持多图参考",
+            },
+            "grok2": {
+                "label": "Grok 2K",
+                "names": self._command_names_for_key("grok2"),
+                "description": "2K 文生图，不接受参考图",
+            },
+            "video": {
+                "label": "Grok 视频",
+                "names": self._command_names_for_key("video"),
+                "description": "文生/图生视频；可在指令中写 1-15 秒",
+            },
+            "main_gif": {
+                "label": "主通道 GIF 分镜",
+                "names": self._command_names_for_key("main_gif"),
+            },
+            "main_gif2": {
+                "label": "主通道 9 帧分镜",
+                "names": self._command_names_for_key("main_gif2"),
+            },
+            "image2_gif": {
+                "label": "Image2 GIF 分镜",
+                "names": self._command_names_for_key("image2_gif"),
+            },
+            "image2_gif2": {
+                "label": "Image2 9 帧分镜",
+                "names": self._command_names_for_key("image2_gif2"),
+            },
+            "admin_quota": {
+                "label": "额度",
+                "names": _DEFAULT_ADMIN_COMMAND_NAMES["quota"],
+                "description": "管理员查询或设置三条通道日配额。",
+            },
+            "admin_reset": {
+                "label": "重置额度",
+                "names": _DEFAULT_ADMIN_COMMAND_NAMES["reset"],
+                "description": "管理员清零今日已用次数，累计次数保留。",
+            },
+            "admin_moderation": {
+                "label": "审核",
+                "names": _DEFAULT_ADMIN_COMMAND_NAMES["moderation"],
+                "description": "查询或切换本地敏感词审核。",
+            },
+            "help": {
+                "label": "帮助",
+                "names": self._help_command_names(),
+                "description": "显示当前全部 canonical 指令和别名。",
+            },
+        }
+
+    def _command_catalog(self) -> list[dict[str, object]]:
+        """Return the same command/alias catalog used by help and the WebUI."""
+        groups = self._command_help_groups()
+        descriptions = {
+            "main": "主图像文生图、修图、多图参考和引用图编辑。",
+            "image2": "独立 Image2 通道；Images 模式最多一张参考图。",
+            "grok": "Grok Images 文生图/图生图，支持多图参考。",
+            "grok2": "Grok 2K 文生图，仅支持文字提示词。",
+            "video": "Grok2API 异步文生/图生视频，支持 1-15 秒。",
+            "main_gif": "主通道生成 4x4、16 帧 GIF 分镜。",
+            "main_gif2": "主通道生成 3x3、9 帧 GIF 分镜。",
+            "image2_gif": "Image2 通道生成 4x4、16 帧 GIF 分镜。",
+            "image2_gif2": "Image2 通道生成 3x3、9 帧 GIF 分镜。",
+            "admin_quota": "管理员查询或设置三条通道日配额。",
+            "admin_reset": "管理员清零今日已用次数，累计次数保留。",
+            "admin_moderation": "查询或切换本地敏感词审核。",
+            "help": "显示当前全部 canonical 指令和别名。",
+        }
+        catalog: list[dict[str, object]] = []
+        for key, item in groups.items():
+            names = [str(name) for name in item.get("names", [])]
+            if not names:
+                continue
+            catalog.append(
+                {
+                    "key": key,
+                    "primary": names[0],
+                    "aliases": names[1:],
+                    "names": names,
+                    "description": descriptions.get(key, ""),
+                }
+            )
+        catalog.append(
+            {
+                "key": "kkgif",
+                "primary": "kkgif",
+                "aliases": [],
+                "names": ["kkgif"],
+                "description": "把一个附带或引用的视频在本地转换为 GIF。",
+            }
+        )
+        catalog.append(
+            {
+                "key": "kkgifzip",
+                "primary": "kkgifzip",
+                "aliases": [f"kkgifzip{level}" for level in range(1, 6)],
+                "names": self._kkgifzip_command_names(),
+                "description": "五档压缩视频/GIF 为表情包风；静态图不支持。",
+            }
+        )
+        return catalog
+
+    def _apply_configured_command_aliases(self) -> None:
+        """Inject plugin aliases into AstrBot's registered command filters."""
+        try:
+            from astrbot.core.star.filter.command import CommandFilter
+            from astrbot.core.star.star_handler import star_handlers_registry
+        except ImportError:
+            return
+
+        wanted = {
+            self._COMMAND_HANDLER_NAMES[key]: key
+            for key in self._COMMAND_HANDLER_NAMES
+        }
+        for metadata in star_handlers_registry:
+            if getattr(metadata, "handler_name", "") == self._HELP_HANDLER_NAME:
+                for event_filter in getattr(metadata, "event_filters", []):
+                    if not isinstance(event_filter, CommandFilter):
+                        continue
+                    if event_filter.command_name != "kkt帮助":
+                        continue
+                    help_names = self._help_command_names()
+                    event_filter.alias = set(help_names[1:])
+                    event_filter._cmpl_cmd_names = None
+                    break
+                continue
+            key = wanted.get(getattr(metadata, "handler_name", ""))
+            if key is None:
+                continue
+            canonical = self._COMMAND_CANONICALS[key]
+            aliases = self._command_names_for_key(
+                key, include_duration_aliases=key == "video"
+            )[1:]
+            for event_filter in getattr(metadata, "event_filters", []):
+                if not isinstance(event_filter, CommandFilter):
+                    continue
+                if event_filter.command_name != canonical:
+                    continue
+                event_filter.alias = set(aliases)
+                event_filter._cmpl_cmd_names = None
+                break
+
+    def _help_command_names(self) -> list[str]:
+        """Return the help command plus each configured alias with help suffix."""
+        names = ["kkt帮助", *_DEFAULT_HELP_ALIASES]
+        for key in self._COMMAND_CANONICALS:
+            for command_name in self._command_names_for_key(key):
+                names.extend((f"{command_name}帮助", f"{command_name}help"))
+        return list(dict.fromkeys(names))
+
+    @classmethod
+    def _parse_grokv_duration(
+        cls,
+        event: AstrMessageEvent,
+        prompt: str,
+        default_duration: int,
+        command_names: list[str] | None = None,
+    ) -> tuple[int, str, str | None]:
+        """Parse ``/grokvideo 5`` and compact duration aliases."""
+        text = (prompt or "").strip()
+        raw = (event.get_message_str() or "").strip()
+        duration: int | None = None
+
+        names = command_names or ["grokvideo", "grokv", "gkv", "gv"]
+        name_pattern = "|".join(
+            re.escape(name) for name in sorted(set(names), key=len, reverse=True)
+        )
+        compact = re.match(
+            rf"^/?(?:{name_pattern})(\d+)(?:\s|$)", raw, re.IGNORECASE
+        )
+        if compact:
+            duration = int(compact.group(1))
+        else:
+            spaced = re.match(r"^(\d+)(?:\s+|$)(.*)$", text, re.DOTALL)
+            if spaced:
+                duration = int(spaced.group(1))
+                text = spaced.group(2).strip()
+
+        if duration is None:
+            duration = default_duration
+        if duration < 1 or duration > 15:
+            return duration, text, "视频时长只能是 1-15 秒，例如 /grokvideo 5。"
+        return duration, text, None
 
     @staticmethod
     def _parse_group_ids(value) -> set[str]:
@@ -642,6 +1385,299 @@ class KktImagePlugin(Star):
         chain.append(Comp.Image(file=str(image_path)))
         return chain
 
+    def _make_video_component(self, video_path: str):
+        """与 link_resolver 一致：绝对路径 + Video.fromFileSystem。"""
+        abs_path = str(Path(video_path).resolve())
+        if not Path(abs_path).is_file() or Path(abs_path).stat().st_size <= 0:
+            raise FileNotFoundError(f"视频文件无效: {abs_path}")
+        return Comp.Video.fromFileSystem(abs_path)
+
+    def _video_aspect_ratio_for_image(self, image_item: dict) -> str:
+        """Pick the supported ratio closest to the reference image."""
+        configured = self.video_aspect_ratio
+        data_url = str(image_item.get("data_url") or "").strip()
+        if not data_url.startswith("data:") or "," not in data_url:
+            return configured
+        try:
+            _, encoded = data_url.split(",", 1)
+            with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+                width, height = image.size
+            source_ratio = width / height
+            candidates = {
+                "1:1": 1.0,
+                "16:9": 16 / 9,
+                "9:16": 9 / 16,
+                "4:3": 4 / 3,
+                "3:4": 3 / 4,
+                "3:2": 3 / 2,
+                "2:3": 2 / 3,
+            }
+            selected = min(candidates, key=lambda ratio: abs(candidates[ratio] - source_ratio))
+            logger.info(
+                "[kkt] video aspect matched reference: image=%sx%s ratio=%.4f configured=%s selected=%s",
+                width, height, source_ratio, configured, selected,
+            )
+            return selected
+        except Exception as exc:
+            logger.warning("[kkt] video aspect match failed, use configured=%s err=%s", configured, exc)
+            return configured
+
+    @staticmethod
+    def _animated_reference_notice(image_items: list[dict]) -> str | None:
+        frames = [
+            str(item.get("animated_frame") or "").strip()
+            for item in image_items
+            if str(item.get("animated_frame") or "").strip()
+        ]
+        if not frames:
+            return None
+        unique = list(dict.fromkeys(frames))
+        return f"参考动图已选取{'、'.join(unique)}。"
+
+    @staticmethod
+    def _safe_image_failure(exc: Exception) -> str:
+        text = str(exc or "").lower()
+        if "拒绝生成" in str(exc) or "safety" in text or "moderation" in text:
+            return "图片生成被上游拒绝，请修改提示词后重试。"
+        return "图片生成失败，请稍后重试。"
+
+    @staticmethod
+    def _safe_video_failure(exc: GrokVideoError) -> str:
+        code = str(getattr(exc, "code", "") or "").lower()
+        if code == "timeout":
+            return "视频生成超时，请稍后重试。"
+        if code in {"download_failed", "media_too_large", "invalid_response"}:
+            return "视频已生成，但发送失败，请稍后重试。"
+        if code in {"invalid_parameter", "invalid_request"}:
+            return "视频参数无效，请检查提示词后重试。"
+        return "视频生成失败，请稍后重试。"
+
+    async def _send_video_direct(
+        self,
+        event: AstrMessageEvent,
+        video_path: str,
+        *,
+        elapsed_seconds: int | None = None,
+    ) -> None:
+        """Direct Send Pattern（参考 link_resolver）：
+
+        1) 单独 await event.send(MessageChain([Video]))，不走 yield/装饰链
+        2) 视频发送成功后再发送完成文案
+        3) 发送完成后再清理本地文件
+        """
+        video_component = self._make_video_component(video_path)
+        logger.info(
+            "[kkt] video direct send start: path=%s size=%d",
+            video_path,
+            Path(video_path).stat().st_size,
+        )
+        await event.send(MessageChain([video_component]))
+        logger.info("[kkt] video direct send done: path=%s", video_path)
+
+        tip_chain: list = []
+        if self.reply_with_quote:
+            message_id = self._extract_reaction_message_id(event)
+            if message_id is not None:
+                tip_chain.append(Comp.Reply(id=message_id))
+        if elapsed_seconds is not None:
+            tip_chain.append(
+                Comp.Plain(f"视频生成成功，耗时：{elapsed_seconds}秒，请查收喵")
+            )
+        if tip_chain:
+            try:
+                await event.send(MessageChain(tip_chain))
+            except Exception as exc:
+                logger.warning("[kkt] video success tip send failed: %s", exc)
+
+    def _check_video_cooldown(self, event: AstrMessageEvent) -> str | None:
+        """视频通道独立 CD；管理员跳过。"""
+        if self.video_cooldown_seconds <= 0:
+            return None
+        if self._is_admin(event):
+            return None
+        sender_id = str(event.get_sender_id() or "").strip()
+        if not sender_id:
+            return None
+        last = self._video_user_last_call.get(sender_id)
+        if last is None:
+            return None
+        remain = self.video_cooldown_seconds - (time.monotonic() - last)
+        if remain > 0:
+            return f"视频操作太快了，请 {int(remain) + 1} 秒后再试。"
+        return None
+
+    def _mark_video_cooldown(self, event: AstrMessageEvent) -> None:
+        if self.video_cooldown_seconds <= 0:
+            return
+        if self._is_admin(event):
+            return
+        sender_id = str(event.get_sender_id() or "").strip()
+        if sender_id:
+            self._video_user_last_call[sender_id] = time.monotonic()
+
+    async def _try_acquire_video_slot(
+        self, event: AstrMessageEvent
+    ) -> tuple[bool, str | None]:
+        """尝试占用视频并发槽（非阻塞）；失败返回 (False, 提示)。"""
+        sender_id = str(event.get_sender_id() or "").strip() or "anonymous"
+        async with self._video_slot_lock:
+            user_n = int(self._video_user_inflight.get(sender_id, 0))
+            if user_n >= self.video_max_concurrent_per_user:
+                logger.info(
+                    "[kkt] video per-user concurrent full: sender=%s inflight=%d limit=%d",
+                    sender_id,
+                    user_n,
+                    self.video_max_concurrent_per_user,
+                )
+                return False, (
+                    f"你已有视频在生成中（每用户最多 "
+                    f"{self.video_max_concurrent_per_user} 个），请稍后再试。"
+                )
+            if self._video_global_inflight >= self.video_max_concurrent:
+                logger.info(
+                    "[kkt] video global concurrent full: inflight=%d limit=%d sender=%s",
+                    self._video_global_inflight,
+                    self.video_max_concurrent,
+                    sender_id,
+                )
+                return False, (
+                    f"当前视频生成队列已满（最多同时 {self.video_max_concurrent} 个），"
+                    "请稍后再试。"
+                )
+            self._video_global_inflight += 1
+            self._video_user_inflight[sender_id] = user_n + 1
+            logger.info(
+                "[kkt] video slot acquired: sender=%s user_inflight=%d global_inflight=%d",
+                sender_id,
+                self._video_user_inflight[sender_id],
+                self._video_global_inflight,
+            )
+            return True, None
+
+    async def _release_video_slot(self, event: AstrMessageEvent) -> None:
+        sender_id = str(event.get_sender_id() or "").strip() or "anonymous"
+        async with self._video_slot_lock:
+            user_n = int(self._video_user_inflight.get(sender_id, 0))
+            if user_n <= 1:
+                self._video_user_inflight.pop(sender_id, None)
+            else:
+                self._video_user_inflight[sender_id] = user_n - 1
+            self._video_global_inflight = max(0, self._video_global_inflight - 1)
+            logger.info(
+                "[kkt] video slot released: sender=%s user_inflight=%s global_inflight=%d",
+                sender_id,
+                self._video_user_inflight.get(sender_id, 0),
+                self._video_global_inflight,
+            )
+
+    def _schedule_video_cleanup(self, path: str) -> None:
+        delay = max(5, int(self.video_cleanup_delay))
+
+        async def cleanup():
+            await asyncio.sleep(delay)
+            try:
+                Path(path).unlink(missing_ok=True)
+                logger.debug("[kkt] video temp cleaned: %s", path)
+            except OSError as exc:
+                logger.warning("[kkt] video temp cleanup failed: %s err=%s", path, exc)
+
+        asyncio.create_task(cleanup())
+
+    async def _materialize_video_bytes(
+        self, content: bytes, content_type: str = "video/mp4"
+    ) -> str:
+        suffix = ".mp4"
+        ctype = (content_type or "").lower()
+        if "webm" in ctype:
+            suffix = ".webm"
+        elif "quicktime" in ctype or "mov" in ctype:
+            suffix = ".mov"
+        path = self.temp_dir / f"kkt_video_{int(time.time() * 1000)}{suffix}"
+        path.write_bytes(content)
+        logger.info(
+            "[kkt] video saved: path=%s bytes=%d ctype=%s",
+            path,
+            len(content),
+            content_type,
+        )
+        return str(path)
+
+    async def _transcode_video_for_qq(self, src_path: str) -> str:
+        """Re-mux/re-encode for NapCat/QQ: H.264 Main + AAC + faststart.
+
+        Upstream grok mp4 often triggers FFmpeg 'timescale not set' and may
+        silently fail to display in QQ even though NapCat logs send success.
+        """
+        src = Path(src_path)
+        if not src.is_file():
+            return src_path
+        out = src.with_name(f"{src.stem}_qq.mp4")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(src),
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "main",
+            "-level",
+            "3.1",
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-r",
+            "24",
+            "-g",
+            "48",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-brand",
+            "mp42",
+            str(out),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+            if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 1024:
+                err = (stderr or b"").decode("utf-8", errors="replace")[:300]
+                logger.warning(
+                    "[kkt] video transcode failed, use original: code=%s err=%s",
+                    proc.returncode,
+                    err,
+                )
+                return src_path
+            logger.info(
+                "[kkt] video transcoded for QQ: src=%s(%d) -> out=%s(%d)",
+                src.name,
+                src.stat().st_size,
+                out.name,
+                out.stat().st_size,
+            )
+            return str(out)
+        except FileNotFoundError:
+            logger.warning("[kkt] ffmpeg not found, skip video transcode")
+            return src_path
+        except Exception as exc:
+            logger.warning("[kkt] video transcode error, use original: %s", exc)
+            return src_path
+
     @staticmethod
     def _is_admin(event: AstrMessageEvent) -> bool:
         try:
@@ -679,14 +1715,19 @@ class KktImagePlugin(Star):
     @classmethod
     def _channel_for_command(cls, command: str) -> str:
         """指令名 → 计费通道。"""
-        if str(command or "").strip().lower() == cls._CHANNEL_IMAGE2:
+        name = str(command or "").strip().lower()
+        if name in {cls._CHANNEL_IMAGE2, "image2gif", "image2gif2"}:
             return cls._CHANNEL_IMAGE2
+        if name in {cls._CHANNEL_VIDEO, "grokvideo", "grokv"}:
+            return cls._CHANNEL_VIDEO
         return cls._CHANNEL_MAIN
 
     def _cost_usd_for_channel(self, channel: str) -> float:
         if channel == self._CHANNEL_IMAGE2:
-            return float(self.cost_image2_usd)
-        return float(self.cost_main_usd)
+            return float(getattr(self, "cost_image2_usd", 0) or 0)
+        if channel == self._CHANNEL_VIDEO:
+            return float(getattr(self, "cost_video_usd", 0) or 0)
+        return float(getattr(self, "cost_main_usd", 0) or 0)
 
     @staticmethod
     def _empty_channel_bucket() -> dict:
@@ -777,6 +1818,122 @@ class KktImagePlugin(Star):
         except Exception as exc:
             logger.warning("[kkt] 写入用量失败: %s", exc)
 
+    @staticmethod
+    def _task_timestamp() -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def _load_task_logs(self) -> list[dict]:
+        try:
+            if self.task_log_path.exists():
+                data = json.loads(self.task_log_path.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    logs = [item for item in data if isinstance(item, dict)]
+                    for item in logs:
+                        if item.get("status") == "running":
+                            item["status"] = "interrupted"
+                            item["code"] = "plugin_reload"
+                    return logs[-100:]
+        except Exception as exc:
+            logger.warning("[kkt] 读取任务日志失败: %s", exc)
+        return []
+
+    def _save_task_logs(self) -> None:
+        try:
+            payload = [
+                {key: value for key, value in item.items() if not key.startswith("_")}
+                for item in self._task_logs[-100:]
+            ]
+            self.task_log_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("[kkt] 写入任务日志失败: %s", exc)
+
+    def _start_task_log(
+        self, *, channel: str, command: str, prompt: str, model: str
+    ) -> str:
+        task_id = f"task_{int(time.time() * 1000)}_{len(self._task_logs) + 1}"
+        item = {
+            "task_id": task_id,
+            "channel": channel,
+            "command": command,
+            "model": model,
+            "prompt": str(prompt or "").strip()[:500],
+            "status": "running",
+            "progress": 0,
+            "code": "submitted",
+            "request_id": "",
+            "started_at": self._task_timestamp(),
+            "finished_at": "",
+            "duration_seconds": None,
+            "_started_epoch": time.time(),
+        }
+        self._task_logs.append(item)
+        self._save_task_logs()
+        logger.info(
+            "[kkt] task started: task_id=%s channel=%s command=%s model=%s prompt_len=%d",
+            task_id,
+            channel,
+            command,
+            model,
+            len(item["prompt"]),
+        )
+        return task_id
+
+    def _update_task_log(
+        self, task_id: str, *, progress: int | None = None, request_id: str = ""
+    ) -> None:
+        for item in reversed(self._task_logs):
+            if item.get("task_id") != task_id:
+                continue
+            if progress is not None:
+                item["progress"] = max(0, min(100, int(progress)))
+            if request_id:
+                item["request_id"] = str(request_id)
+                item["code"] = str(request_id)
+            self._save_task_logs()
+            return
+
+    def _finish_task_log(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        code: str,
+        progress: int,
+        request_id: str = "",
+    ) -> None:
+        for item in reversed(self._task_logs):
+            if item.get("task_id") != task_id:
+                continue
+            item["status"] = status
+            item["progress"] = max(0, min(100, int(progress)))
+            item["code"] = str(code or "")[:120]
+            if request_id:
+                item["request_id"] = str(request_id)
+            item["finished_at"] = self._task_timestamp()
+            started = item.get("_started_epoch")
+            if isinstance(started, (int, float)):
+                item["duration_seconds"] = max(0, int(round(time.time() - started)))
+            self._save_task_logs()
+            logger.info(
+                "[kkt] task finished: task_id=%s status=%s code=%s progress=%d",
+                task_id,
+                status,
+                str(code)[:120],
+                item["progress"],
+            )
+            return
+
+    def _get_task_logs(self, limit: int = 50) -> list[dict]:
+        result = []
+        for item in reversed(self._task_logs[-max(1, min(100, limit)):]):
+            result.append(
+                {key: value for key, value in item.items() if not key.startswith("_")}
+            )
+        return result
+
     # 兼容旧测试/调用
     def _load_quota_state(self) -> dict:
         usage = self._load_usage_state()
@@ -863,11 +2020,9 @@ class KktImagePlugin(Star):
         return int(self._load_channel_limits().get(self._CHANNEL_MAIN, 0))
 
     def _save_daily_quota_limit(self, limit: int) -> None:
-        """兼容：两通道设为同一上限。"""
+        """兼容：全部通道设为同一上限。"""
         limit = max(0, int(limit))
-        self._save_channel_limits(
-            {self._CHANNEL_MAIN: limit, self._CHANNEL_IMAGE2: limit}
-        )
+        self._save_channel_limits({ch: limit for ch in self._CHANNELS})
 
     @classmethod
     def _parse_channel_token(cls, text: str) -> str | None:
@@ -879,6 +2034,8 @@ class KktImagePlugin(Star):
             return cls._CHANNEL_MAIN
         if raw in {"image2", "img2", "image", "图2"}:
             return cls._CHANNEL_IMAGE2
+        if raw in {"video", "grokv", "vid", "视频"}:
+            return cls._CHANNEL_VIDEO
         if raw in {"all", "全部", "所有"}:
             return "all"
         return None
@@ -896,7 +2053,8 @@ class KktImagePlugin(Star):
             return None
         cleaned = re.sub(
             r"(?i)^\s*(?:额度|限额|配额|quota|limit|set|to|为|到|=|:|：|"
-            r"main|kkt|hajimi|image2|img2|image|默认|主通道|图2|全部|所有|all)+",
+            r"main|kkt|hajimi|image2|img2|image|video|grokv|vid|"
+            r"默认|主通道|图2|视频|全部|所有|all)+",
             "",
             raw,
         ).strip()
@@ -933,7 +2091,8 @@ class KktImagePlugin(Star):
                 return ch, None, True
             # image2=10 / main:20
             m = re.fullmatch(
-                r"(?i)(main|kkt|hajimi|image2|img2|image|默认|主通道|图2)"
+                r"(?i)(main|kkt|hajimi|image2|img2|image|video|grokv|vid|"
+                r"默认|主通道|图2|视频)"
                 r"\s*(?:=|：|:)?\s*(\d+)",
                 token,
             )
@@ -1017,23 +2176,34 @@ class KktImagePlugin(Star):
         )
 
         if self.cooldown_seconds <= 0:
-            cd_line = "冷却：关闭"
+            cd_line = "出图冷却：关闭"
         elif event is not None and self._is_admin(event):
-            cd_line = f"冷却：{self.cooldown_seconds}s（管理员免冷却）"
+            cd_line = f"出图冷却：{self.cooldown_seconds}s（管理员免冷却）"
         elif event is not None:
             sender_id = str(event.get_sender_id() or "").strip()
             last = self._user_last_call.get(sender_id) if sender_id else None
             if last is None:
-                cd_line = f"冷却：{self.cooldown_seconds}s"
+                cd_line = f"出图冷却：{self.cooldown_seconds}s"
             else:
                 remain_cd = self.cooldown_seconds - (time.monotonic() - last)
                 if remain_cd > 0:
-                    cd_line = f"冷却：还需 {int(remain_cd) + 1}s"
+                    cd_line = f"出图冷却：还需 {int(remain_cd) + 1}s"
                 else:
-                    cd_line = f"冷却：{self.cooldown_seconds}s"
+                    cd_line = f"出图冷却：{self.cooldown_seconds}s"
         else:
-            cd_line = f"冷却：{self.cooldown_seconds}s"
+            cd_line = f"出图冷却：{self.cooldown_seconds}s"
         lines.append(cd_line)
+        video_cd = int(getattr(self, "video_cooldown_seconds", 0) or 0)
+        video_max = int(getattr(self, "video_max_concurrent", 2) or 2)
+        video_per = int(getattr(self, "video_max_concurrent_per_user", 1) or 1)
+        if video_cd <= 0:
+            lines.append("视频冷却：关闭")
+        else:
+            lines.append(
+                f"视频冷却：{video_cd}s · "
+                f"并发上限 {video_max}"
+                f"（每用户 {video_per}）"
+            )
         return "\n".join(lines)
 
     async def _set_channel_quota_limit(
@@ -1207,15 +2377,152 @@ class KktImagePlugin(Star):
             return None
 
     @classmethod
-    def _command_arg_from_text(cls, text: str) -> str | None:
-        """从完整指令文本中截取命令后的参数；匹配失败返回 None。"""
+    def _command_arg_from_text(
+        cls, text: str, command_names: list[str] | None = None
+    ) -> str | None:
+        """从完整指令文本中截取命令后的参数，支持运行时别名。"""
         text = (text or "").strip()
         if not text:
             return None
-        match = cls._CMD_ARG_RE.match(text)
+        if command_names is None:
+            match = cls._CMD_ARG_RE.match(text)
+        else:
+            names = sorted(
+                {str(name).strip() for name in command_names if str(name).strip()},
+                key=len,
+                reverse=True,
+            )
+            if not names:
+                return None
+            name_pattern = "|".join(re.escape(name) for name in names)
+            pattern = re.compile(
+                rf"^/?(?:{name_pattern})(?:帮助|help|\?)?(?:\s+|$)(.*)$",
+                re.IGNORECASE | re.DOTALL,
+            )
+            match = pattern.match(text)
         if not match:
             return None
         return match.group(1).strip()
+
+    @staticmethod
+    def _is_gif_command(command: str) -> bool:
+        return str(command or "").strip().lower() in {
+            "hajimigif",
+            "hajimigif2",
+            "kktgif",
+            "image2gif",
+            "image2gif2",
+        }
+
+    @staticmethod
+    def _gif_grid_size(command: str) -> int:
+        """Return the square grid dimension for a GIF command."""
+        return 3 if str(command or "").strip().lower().endswith("gif2") else 4
+
+    @staticmethod
+    def _gif_api_command(command: str) -> str:
+        """Map GIF variants to the underlying image API channel."""
+        return "image2" if str(command or "").strip().lower().startswith("image2") else "hajimi"
+
+    def _build_gif_prompt(self, prompt: str, grid_size: int = 4) -> str:
+        """Turn a user action into a fixed-layout 16-frame storyboard request."""
+        frame_count = grid_size * grid_size
+        action = (prompt or "").strip()
+        if action:
+            action_instruction = (
+                f"用户指定的效果：{action}\n"
+                "请先理解这个效果，再把它设计成一个简单、清晰、适合聊天表情包的循环动作。"
+            )
+        else:
+            action_instruction = (
+                "用户没有指定具体动作。请你自行选择一个适合参考主体的简单、可爱、"
+                "容易看懂且适合循环播放的动作，例如轻微挥手、点头、眨眼、摇摆或卖萌；"
+                "不要加入复杂场景、快速镜头运动或需要额外角色的剧情。"
+            )
+        background = (
+            "如果用户要求抠图、去背景或贴纸效果，使用统一纯色背景；"
+            "不要在不同格子中改变背景颜色。"
+            if re.search(r"抠|去背|透明|贴纸|表情包", action, re.IGNORECASE)
+            else "保持统一、简单的背景，不改变场景布局。"
+        )
+        return (
+            "你正在生成一张供程序裁切成聊天表情包 GIF 的动作分镜图。\n"
+            "【固定画布与对齐要求】\n"
+            f"整张图必须是正方形，并严格覆盖完整的 {grid_size} 列 {grid_size} 行区域，共 {frame_count} 个等大画格。"
+            "画格按照从左到右、从上到下的顺序排列，不能多格、少格、合并、重叠或改变行列。"
+            "不要绘制可见格线、边框、序号或文字；每个画格占据整张图对应的等分区域。"
+            "这是给程序按固定坐标裁切的图，不要把 16 格画成一张连续的大画面。\n"
+            "【连续动画与固定镜头】\n"
+            f"把 {frame_count} 个画格理解为同一段动作在连续时间中的等间隔采样，而不是互不相关的姿势设定图。"
+            "相邻画格之间只发生小幅、渐进、可预测的变化；不要从一个姿势突然跳到另一个姿势。"
+            "动作要有自然的缓入、加速、缓出和回弹，避免相邻画格出现明显跳帧。"
+            "全程锁定同一台相机：固定机位、固定焦距、固定景别、固定视角、固定主体位置。"
+            "禁止推近、拉远、横移、摇镜、旋转镜头、切换视角、切换景别或改变背景透视。\n"
+            "【主体与安全边距】\n"
+            "如果有参考图，不要擅自认定只有一个主角：自然保留其中重要的人物、动物、物体和环境。"
+            "参考图中有多个人或多个主体时，默认让他们共同自然发展和互动；只有用户明确指定某个对象时，才突出该对象。"
+            "参考图中没有人物时，不要强行添加或提取人物，让动物、物体、场景或抽象主体自然成为动画对象。"
+            "每个画格中的重要主体都必须完整位于当前画格内部，并在四周保留明显安全边距。"
+            "身体、四肢、头发、尾巴、道具和特效都不得跨越画格边界。"
+            "保持镜头角度、景别、画风、光照和构图一致，只改变动作和表情。\n"
+            "【用户想要的效果】\n"
+            f"{action_instruction}\n"
+            f"请将动作按连续时间展开到 {frame_count} 个画格，每格是前一格的自然延续，不要只列出离散关键姿势。"
+            f"第 1 格作为动作起点，第 {frame_count} 格回到接近第 1 格的姿势；首尾之间也要有平滑过渡，方便循环播放。"
+            "动作可以夸张，但不能超出当前画格；复杂动作要简化为聊天表情包能看懂的连续变化。\n"
+            f"【背景与输出】\n{background}\n"
+            "不要标题、序号、对白、气泡、水印、额外人物或装饰元素。"
+            f"输出规则、整齐、适合程序固定等分裁切的 {grid_size}x{grid_size} 动作分镜图。"
+        )
+
+    def _make_gif_from_grid(
+        self, source_path: str, grid_size: int = 4
+    ) -> tuple[str, int, int]:
+        """Crop a square storyboard and encode a compact GIF."""
+        source = Path(source_path)
+        with Image.open(source) as opened:
+            image = opened.convert("RGB")
+            side = min(image.width, image.height)
+            if side < grid_size * 128:
+                raise RuntimeError(
+                    f"分镜图分辨率过低：{image.width}x{image.height}，每格至少需要 128 像素"
+                )
+            left = (image.width - side) // 2
+            top = (image.height - side) // 2
+            square = image.crop((left, top, left + side, top + side))
+            cell = side // grid_size
+            if cell < 128:
+                raise RuntimeError("分镜图裁切后单帧尺寸过低")
+
+            frames = []
+            for row in range(grid_size):
+                for column in range(grid_size):
+                    frame = square.crop(
+                        (column * cell, row * cell, (column + 1) * cell, (row + 1) * cell)
+                    )
+                    frame = frame.resize(
+                        (self.gif_frame_size, self.gif_frame_size), Image.Resampling.LANCZOS
+                    )
+                    frames.append(frame)
+
+        gif_path = self.temp_dir / f"kkt_gif_{int(time.time() * 1000)}.gif"
+        frames[0].save(
+            gif_path,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=max(20, round(1000 / self.gif_fps)),
+            loop=0,
+            optimize=True,
+            disposal=2,
+        )
+        size = gif_path.stat().st_size
+        if size > self.gif_max_bytes:
+            gif_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"GIF 文件过大：{size / 1024 / 1024:.1f}MB，限制为 {self.gif_max_bytes / 1024 / 1024:.1f}MB"
+            )
+        return str(gif_path), len(frames), cell
 
     @classmethod
     def _strip_at_tokens(cls, text: str) -> str:
@@ -1228,7 +2535,12 @@ class KktImagePlugin(Star):
         return (text or "").strip().lower() in {"帮助", "help", "?"}
 
     @classmethod
-    def _extract_prompt(cls, event: AstrMessageEvent, prompt: str) -> str:
+    def _extract_prompt(
+        cls,
+        event: AstrMessageEvent,
+        prompt: str,
+        command_names: list[str] | None = None,
+    ) -> str:
         """从消息中恢复命令后的文字提示词。
 
         AstrBot 的 GreedyStr 会把 At 组件序列化成 ``@昵称(QQ)``，导致
@@ -1245,13 +2557,13 @@ class KktImagePlugin(Star):
             for component in event.get_messages()
             if isinstance(component, Comp.Plain)
         )
-        from_plain = cls._command_arg_from_text(plain_text)
+        from_plain = cls._command_arg_from_text(plain_text, command_names)
         if from_plain is not None:
             candidates.append(from_plain)
 
         # 2) 整句 message_str（可能含 @昵称(QQ)）
         raw = (event.get_message_str() or "").strip()
-        from_raw = cls._command_arg_from_text(raw)
+        from_raw = cls._command_arg_from_text(raw, command_names)
         if from_raw is not None:
             candidates.append(from_raw)
 
@@ -1273,29 +2585,14 @@ class KktImagePlugin(Star):
 
     @filter.command(
         "kkt额度",
-        alias={
-            "hajimi额度",
-            "image2额度",
-            "kktquota",
-            "hajimiquota",
-            "image2quota",
-            "kkt限额",
-            "hajimi限额",
-            "image2限额",
-            "kkt配额",
-            "hajimi配额",
-            "image2配额",
-            "kkt统计",
-            "hajimi统计",
-            "image2统计",
-        },
+        alias=set(_DEFAULT_ADMIN_COMMAND_NAMES["quota"][1:]),
     )
     async def handle_quota_status(self, event: AstrMessageEvent, arg: GreedyStr = ""):
-        """查看或设置分通道日配额（含预估费用）。
+        """查看或设置主图像、Image2、Grok 视频分通道日配额（含预估费用）。
 
         - /kkt额度 -> 查询（仅管理员）
-        - /kkt额度 10 -> 两通道日上限改为 10
-        - /kkt额度 main 100 / /kkt额度 image2 20 -> 单通道
+        - /kkt额度 10 -> 全部通道日上限改为 10
+        - /kkt额度 main 100 / /kkt额度 image2 20 / /kkt额度 video 5 -> 单通道
         """
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
@@ -1320,7 +2617,8 @@ class KktImagePlugin(Star):
             yield event.plain_result(
                 "参数无效。\n"
                 "查询：/kkt额度\n"
-                "设置：/kkt额度 10 或 /kkt额度 main 100 或 /kkt额度 image2 20"
+                "设置：/kkt额度 10 或 /kkt额度 main 100\n"
+                "     /kkt额度 image2 20 或 /kkt额度 video 5"
             )
             return
 
@@ -1332,7 +2630,7 @@ class KktImagePlugin(Star):
         old_limits = dict(self.channel_limits)
         await self._set_channel_quota_limit(target, limit)
         if target == "all":
-            head = f"两通道日限额 → {limit}（0=不限制）"
+            head = f"全通道日限额 → {limit}（0=不限制）"
         else:
             label = self._CHANNEL_LABELS.get(target, target)
             old_v = old_limits.get(target, 0)
@@ -1349,21 +2647,12 @@ class KktImagePlugin(Star):
 
     @filter.command(
         "kkt重置额度",
-        alias={
-            "hajimi重置额度",
-            "image2重置额度",
-            "kktresetquota",
-            "hajimiresetquota",
-            "image2resetquota",
-            "kkt清零额度",
-            "hajimi清零额度",
-            "image2清零额度",
-        },
+        alias=set(_DEFAULT_ADMIN_COMMAND_NAMES["reset"][1:]),
     )
     async def handle_quota_reset(
         self, event: AstrMessageEvent, arg: GreedyStr = ""
     ):
-        """重置今日已用次数（仅管理员）；累计 total 保留；不改日限额。"""
+        """重置今日已用次数（仅管理员）；累计 total 保留；不改日限额。支持 all、main、image2、video。"""
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             return
@@ -1382,7 +2671,7 @@ class KktImagePlugin(Star):
         channel = self._parse_channel_token(raw_arg) if raw_arg else "all"
         if raw_arg and channel is None:
             yield event.plain_result(
-                "参数无效。/kkt重置额度 [all|main|image2]"
+                "参数无效。/kkt重置额度 [all|main|image2|video]"
             )
             return
         if channel is None:
@@ -1404,16 +2693,7 @@ class KktImagePlugin(Star):
 
     @filter.command(
         "kkt审核",
-        alias={
-            "hajimi审核",
-            "image2审核",
-            "kkt过滤",
-            "hajimi过滤",
-            "image2过滤",
-            "kktsensitive",
-            "hajimisensitive",
-            "image2sensitive",
-        },
+        alias=set(_DEFAULT_ADMIN_COMMAND_NAMES["moderation"][1:]),
     )
     async def handle_sensitive_toggle(
         self, event: AstrMessageEvent, arg: GreedyStr = ""
@@ -1465,33 +2745,65 @@ class KktImagePlugin(Star):
         yield event.plain_result(self._format_sensitive_status())
 
     def _detect_command_name(self, event: AstrMessageEvent) -> str:
-        """从消息中识别触发的主指令名（hajimi / kkt / image2）。"""
+        """从消息中识别 canonical command，别名和视频紧凑时长均支持。"""
+
+        def resolve_token(token: str) -> str | None:
+            normalized = token.lstrip("/").casefold()
+            mapping = getattr(self, "_command_alias_map", {})
+            key = mapping.get(normalized)
+            if key == "kkgif":
+                return "kkgif"
+            if key == "kkgifzip":
+                return "kkgifzip"
+            if key:
+                return self._COMMAND_CANONICALS[key]
+
+            # 兼容某些未经过 CommandFilter 的自定义视频别名+时长写法。
+            for name in self._command_names_for_key("video"):
+                if normalized.startswith(f"{name.casefold()}"):
+                    suffix = normalized[len(name) :]
+                    if suffix.isdigit():
+                        return self._COMMAND_CANONICALS["video"]
+            return None
+
         raw = (event.get_message_str() or "").strip()
         first = raw.split()[0] if raw.split() else ""
-        first = first.lstrip("/").lower()
-        if first.startswith("image2"):
-            return "image2"
-        if first.startswith("kkt"):
-            return "kkt"
-        if first.startswith("hajimi"):
-            return "hajimi"
-        # 兜底：Plain 拼接
+        resolved = resolve_token(first)
+        if resolved:
+            return resolved
+
+        # 兜底：Plain 拼接，部分适配器的 message_str 不含 At/Plain 全文。
         plain = "".join(
             getattr(c, "text", "") or ""
             for c in event.get_messages()
             if isinstance(c, Comp.Plain)
         ).strip()
-        token = plain.split()[0].lstrip("/").lower() if plain.split() else ""
-        if token.startswith("image2"):
-            return "image2"
-        if token.startswith("kkt"):
-            return "kkt"
-        return "hajimi"
+        resolved = resolve_token(plain.split()[0] if plain.split() else "")
+        if resolved:
+            return resolved
+        return self._COMMAND_CANONICALS["main"]
 
     def _resolve_api_credentials(
         self, command: str
     ) -> tuple[str, list[str], str] | str:
         """返回 (api_base, api_keys[主+备], model)；失败返回错误文案。"""
+        if command in {"grok", "grok2"}:
+            keys = self._build_key_chain(
+                getattr(self, "grok_api_key", "")
+                or getattr(self, "api_key", ""),
+                getattr(self, "grok_backup_api_keys", None)
+                or getattr(self, "backup_api_keys", None),
+            )
+            if not keys:
+                return (
+                    "未配置 Grok 生图 API Key。请填写 grok_api_key；"
+                    "留空时会复用主图像 api_key。"
+                )
+            base = (
+                getattr(self, "grok_api_base", "")
+                or getattr(self, "api_base", "")
+            )
+            return base, keys, self._GROK_IMAGE_MODEL
         if command == "image2":
             keys = self._build_key_chain(
                 self.image2_api_key, self.image2_backup_api_keys
@@ -1507,17 +2819,623 @@ class KktImagePlugin(Star):
             return (
                 "未配置 NewAPI Key，请在 AstrBot WebUI 的 Hajimi 图片生成插件配置中填写 api_key。"
             )
-        return self.api_base, keys, self.model
+        model = self._GROK_IMAGE_MODEL if command == "grok" else self.model
+        return self.api_base, keys, model
 
-    @filter.command("hajimi", alias={"kkt", "image2"})
-    async def handle_command(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+    @filter.command("kkgif")
+    async def handle_kkgif(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+        """把一个附带或引用的视频在本地转换为优化后的 GIF，不调用模型。"""
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id and group_id in self.group_blacklist:
+            logger.debug("[kkt] kkgif 忽略黑名单群: group_id=%s", group_id)
+            return
+        event.stop_event()
+        prompt = self._extract_prompt(
+            event, prompt, self._command_names_for_parser()
+        )
+        if self._is_help_token(prompt) or str(prompt or "").strip().lower() in {"help", "帮助", "?"}:
+            yield event.plain_result(
+                "康康视频转 GIF\n用法：引用或附带一个视频后发送 /kkgif\n"
+                "限制：仅支持一个视频，最长 16 秒，输出不含声音。\n"
+                "表情包压缩请用 /kkgifzip 或 /kkgifzip1-5。"
+            )
+            return
+
+        try:
+            videos = await self._collect_videos(event)
+        except Exception as exc:
+            logger.exception("[kkt] kkgif 收集视频失败: %s", exc)
+            yield event.plain_result("没有读取到有效视频，请直接附带或回复一个视频。")
+            return
+        if not videos:
+            yield event.plain_result(
+                "请附带或回复一个视频后再发送 /kkgif。\n"
+                "限制：仅支持一个视频，最长 16 秒。"
+            )
+            return
+        if len(videos) > 1:
+            logger.info("[kkt] kkgif 多视频拦截: count=%d", len(videos))
+            yield event.plain_result("每次只能转换一个视频为 GIF，请只保留一个视频。")
+            return
+
+        task_id = self._start_task_log(
+            channel="gif", command="kkgif", prompt="", model="ffmpeg-gif"
+        )
+        source_path = ""
+        output_path = ""
+        try:
+            source_path = await videos[0].convert_to_file_path()
+            await event.send(
+                event.plain_result("喵～正在把视频压成 GIF，马上就好啦。")
+            )
+            output_path, duration, dimension, fps = await self._convert_video_to_gif(
+                source_path
+            )
+            self._finish_task_log(
+                task_id,
+                status="success",
+                code="converted",
+                progress=100,
+            )
+            logger.info(
+                "[kkt] kkgif 转换成功: source=%s output=%s duration=%.2fs dimension=%d fps=%d",
+                source_path,
+                output_path,
+                duration,
+                dimension,
+                fps,
+            )
+            try:
+                image = Comp.Image.fromFileSystem(str(Path(output_path).resolve()))
+            except Exception:
+                image = Comp.Image(file=str(Path(output_path).resolve()), path=output_path)
+            await event.send(MessageChain([image]))
+            await event.send(event.plain_result("GIF 生成成功，喵～"))
+        except Exception as exc:
+            logger.exception("[kkt] kkgif 转换失败: %s", exc)
+            code = "video_too_long" if "16 秒" in str(exc) else type(exc).__name__
+            self._finish_task_log(task_id, status="failed", code=code, progress=0)
+            if "16 秒" in str(exc):
+                yield event.plain_result("视频超过 16 秒，无法转换为 GIF。")
+            else:
+                yield event.plain_result("GIF 转换失败，请确认视频格式和时长后重试。")
+        finally:
+            if output_path:
+                try:
+                    Path(output_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @filter.command(
+        "kkgifzip",
+        alias={"kkgifzip1", "kkgifzip2", "kkgifzip3", "kkgifzip4", "kkgifzip5"},
+    )
+    async def handle_kkgifzip(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+        """五档压缩视频或 GIF 为表情包风；静态图不支持。"""
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id and group_id in self.group_blacklist:
+            logger.debug("[kkt] kkgifzip 忽略黑名单群: group_id=%s", group_id)
+            return
+        event.stop_event()
+        level = self._parse_kkgifzip_level(event)
+        prompt = self._extract_prompt(
+            event, prompt, self._command_names_for_parser()
+        )
+        if self._is_help_token(prompt) or str(prompt or "").strip().lower() in {
+            "help",
+            "帮助",
+            "?",
+        }:
+            yield event.plain_result(self._kkgifzip_help_text())
+            return
+
+        try:
+            videos = await self._collect_videos(event)
+        except Exception as exc:
+            logger.exception("[kkt] kkgifzip 收集视频失败: %s", exc)
+            videos = []
+        try:
+            gifs = await self._collect_gif_images(event)
+        except Exception as exc:
+            logger.exception("[kkt] kkgifzip 收集 GIF 失败: %s", exc)
+            gifs = []
+
+        static_count = 0
+        try:
+            static_count = await self._count_static_images(event)
+        except Exception as exc:
+            logger.debug("[kkt] kkgifzip 静态图检测失败: %s", exc)
+
+        if len(videos) > 1:
+            yield event.plain_result("每次只能压缩一个视频，请只保留一个视频。")
+            return
+        if len(gifs) > 1:
+            yield event.plain_result("每次只能压缩一个 GIF，请只保留一个动图。")
+            return
+        if videos and gifs:
+            yield event.plain_result("请只保留一个视频或一个 GIF，不要混发。")
+            return
+        if not videos and not gifs:
+            if static_count:
+                yield event.plain_result(
+                    "不支持静态图片（jpg/png 等）。请附带或回复一个视频或 GIF。\n"
+                    f"当前档位：{level}（/kkgifzip1-5，数字越大越糊越小）"
+                )
+            else:
+                yield event.plain_result(
+                    "请附带或回复一个视频或 GIF 后再发送 /kkgifzip。\n"
+                    f"当前档位：{level}；静态图不支持。\n"
+                    "帮助：/kkgifzip 帮助"
+                )
+            return
+
+        source_kind = "video" if videos else "gif"
+        component = videos[0] if videos else gifs[0]
+        preset = self._KKGIFZIP_PRESETS[level]
+        task_id = self._start_task_log(
+            channel="gif",
+            command=f"kkgifzip{level}",
+            prompt="",
+            model="ffmpeg-gifzip",
+        )
+        source_path = ""
+        output_path = ""
+        try:
+            source_path = await component.convert_to_file_path()
+            await event.send(
+                event.plain_result(
+                    f"喵～正在按档位 {level} 压缩"
+                    f"（{preset['dimension']}px / {preset['fps']}fps / {preset['colors']}色），马上就好啦。"
+                )
+            )
+            if source_kind == "video":
+                output_path, duration, dimension, fps, colors = (
+                    await self._convert_media_to_zip_gif(
+                        source_path, level=level, source_kind="video"
+                    )
+                )
+            else:
+                if not await self._path_is_animated_gif(source_path):
+                    self._finish_task_log(
+                        task_id, status="failed", code="static_image", progress=0
+                    )
+                    yield event.plain_result(
+                        "不支持静态图片。请附带或回复一个视频或 GIF。"
+                    )
+                    return
+                output_path, duration, dimension, fps, colors = (
+                    await self._convert_media_to_zip_gif(
+                        source_path, level=level, source_kind="gif"
+                    )
+                )
+            self._finish_task_log(
+                task_id,
+                status="success",
+                code="converted",
+                progress=100,
+            )
+            logger.info(
+                "[kkt] kkgifzip 转换成功: level=%d kind=%s source=%s output=%s "
+                "duration=%.2fs dimension=%d fps=%d colors=%d",
+                level,
+                source_kind,
+                source_path,
+                output_path,
+                duration,
+                dimension,
+                fps,
+                colors,
+            )
+            try:
+                image = Comp.Image.fromFileSystem(str(Path(output_path).resolve()))
+            except Exception:
+                image = Comp.Image(
+                    file=str(Path(output_path).resolve()), path=output_path
+                )
+            await event.send(MessageChain([image]))
+            await event.send(
+                event.plain_result(
+                    f"压缩完成（档位 {level} · {dimension}px · {fps}fps · {colors}色），喵～"
+                )
+            )
+        except Exception as exc:
+            logger.exception("[kkt] kkgifzip 转换失败: %s", exc)
+            code = "video_too_long" if "16 秒" in str(exc) else type(exc).__name__
+            self._finish_task_log(task_id, status="failed", code=code, progress=0)
+            if "16 秒" in str(exc):
+                yield event.plain_result("视频超过 16 秒，无法压缩为 GIF。")
+            elif "静态" in str(exc):
+                yield event.plain_result("不支持静态图片。请附带或回复一个视频或 GIF。")
+            else:
+                yield event.plain_result(
+                    "压缩失败，请确认是视频或 GIF，并检查格式后重试。"
+                )
+        finally:
+            if output_path:
+                try:
+                    Path(output_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _parse_kkgifzip_level(self, event: AstrMessageEvent) -> int:
+        """从消息指令解析档位：/kkgifzip → 1，/kkgifzip2 → 2 … /kkgifzip5 → 5。"""
+        raw = (event.get_message_str() or "").strip()
+        first = raw.split()[0] if raw.split() else ""
+        match = self._KKGIFZIP_LEVEL_RE.match(first.lstrip("/"))
+        if not match:
+            plain = "".join(
+                getattr(c, "text", "") or ""
+                for c in event.get_messages()
+                if isinstance(c, Comp.Plain)
+            ).strip()
+            token = plain.split()[0] if plain.split() else ""
+            match = self._KKGIFZIP_LEVEL_RE.match(token.lstrip("/"))
+        if match and match.group(1):
+            return max(1, min(5, int(match.group(1))))
+        return 1
+
+    def _kkgifzip_help_text(self) -> str:
+        lines = [
+            "康康 GIF 压缩（表情包风）",
+            "用法：引用或附带一个视频 / GIF 后发送 /kkgifzip 或 /kkgifzip1-5",
+            "裸 /kkgifzip = 第 1 档；数字越大越糊越小。",
+            "不支持静态图片（jpg/png 等）。",
+            "",
+            "档位：",
+        ]
+        for level, preset in self._KKGIFZIP_PRESETS.items():
+            lines.append(
+                f"  {level}：{preset['dimension']}px · {preset['fps']}fps · "
+                f"{preset['colors']}色"
+            )
+        lines.append("限制：视频最长 16 秒；输出不含声音。")
+        return "\n".join(lines)
+
+    async def _collect_videos(self, event: AstrMessageEvent) -> list:
+        """Collect quoted videos first, then videos in the current message."""
+        quoted: list = []
+        current: list = []
+        seen: set[str] = set()
+
+        def add(target: list, component) -> None:
+            if not isinstance(component, Comp.Video):
+                return
+            value = (
+                getattr(component, "path", None)
+                or getattr(component, "url", None)
+                or getattr(component, "file", None)
+            )
+            marker = str(value or "").strip()
+            if marker and marker not in seen:
+                seen.add(marker)
+                target.append(component)
+
+        for component in event.get_messages():
+            if isinstance(component, Comp.Video):
+                add(current, component)
+            elif isinstance(component, Comp.Reply):
+                for quoted_component in component.chain or []:
+                    add(quoted, quoted_component)
+        videos = quoted + current
+        logger.info("[kkt] kkgif 收集视频: count=%d", len(videos))
+        return videos
+
+    async def _collect_gif_images(self, event: AstrMessageEvent) -> list:
+        """Collect quoted then current message images that look like GIF."""
+        quoted: list = []
+        current: list = []
+        seen: set[str] = set()
+
+        def marker_of(component) -> str:
+            return str(
+                getattr(component, "url", None)
+                or getattr(component, "file", None)
+                or getattr(component, "path", None)
+                or ""
+            ).strip()
+
+        def looks_like_gif(component) -> bool:
+            marker = marker_of(component).lower()
+            if ".gif" in marker or "image/gif" in marker:
+                return True
+            for attr in ("type", "mime", "mime_type", "content_type"):
+                value = str(getattr(component, attr, "") or "").lower()
+                if "gif" in value:
+                    return True
+            return False
+
+        def add(target: list, component) -> None:
+            if not isinstance(component, Comp.Image):
+                return
+            if not looks_like_gif(component):
+                return
+            marker = marker_of(component)
+            if marker and marker not in seen:
+                seen.add(marker)
+                target.append(component)
+
+        for component in event.get_messages():
+            if isinstance(component, Comp.Image):
+                add(current, component)
+            elif isinstance(component, Comp.Reply):
+                for quoted_component in component.chain or []:
+                    add(quoted, quoted_component)
+        gifs = quoted + current
+        logger.info("[kkt] kkgifzip 收集 GIF: count=%d", len(gifs))
+        return gifs
+
+    async def _count_static_images(self, event: AstrMessageEvent) -> int:
+        """Count non-GIF images in quote + current message (for user-facing tip)."""
+        count = 0
+        seen: set[str] = set()
+
+        def is_gif_like(component) -> bool:
+            marker = str(
+                getattr(component, "url", None)
+                or getattr(component, "file", None)
+                or getattr(component, "path", None)
+                or ""
+            ).lower()
+            if ".gif" in marker or "image/gif" in marker:
+                return True
+            for attr in ("type", "mime", "mime_type", "content_type"):
+                value = str(getattr(component, attr, "") or "").lower()
+                if "gif" in value:
+                    return True
+            return False
+
+        def consider(component) -> None:
+            nonlocal count
+            if not isinstance(component, Comp.Image):
+                return
+            marker = str(
+                getattr(component, "url", None)
+                or getattr(component, "file", None)
+                or getattr(component, "path", None)
+                or ""
+            ).strip()
+            if not marker or marker in seen:
+                return
+            seen.add(marker)
+            if not is_gif_like(component):
+                count += 1
+
+        for component in event.get_messages():
+            if isinstance(component, Comp.Image):
+                consider(component)
+            elif isinstance(component, Comp.Reply):
+                for quoted_component in component.chain or []:
+                    consider(quoted_component)
+        return count
+
+    async def _path_is_animated_gif(self, source_path: str) -> bool:
+        path = Path(source_path)
+        suffix = path.suffix.lower()
+        try:
+            with Image.open(path) as opened:
+                fmt = str(opened.format or "").upper()
+                frames = int(getattr(opened, "n_frames", 1) or 1)
+                if fmt == "GIF" and frames > 1:
+                    return True
+                if frames > 1 and suffix in {".gif", ".webp"}:
+                    return True
+                if fmt == "GIF":
+                    return True
+        except Exception as exc:
+            logger.debug("[kkt] GIF 探测失败 path=%s err=%s", source_path, exc)
+            if suffix == ".gif":
+                return True
+            return False
+        return suffix == ".gif"
+
+    async def _probe_video_duration(self, source_path: str) -> float:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            source_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+        if process.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace")[:160]
+            raise RuntimeError(f"ffprobe failed: {detail}")
+        try:
+            duration = float(stdout.decode("utf-8", errors="replace").strip())
+        except ValueError as exc:
+            raise RuntimeError("无法读取视频时长") from exc
+        if duration <= 0:
+            raise RuntimeError("视频时长无效")
+        return duration
+
+    async def _convert_video_to_gif(
+        self, source_path: str
+    ) -> tuple[str, float, int, int]:
+        duration = await self._probe_video_duration(source_path)
+        if duration > self.video_gif_max_duration + 0.05:
+            raise RuntimeError("视频超过 16 秒")
+        dimensions = []
+        for value in (self.video_gif_max_dimension, 360, 256):
+            if value not in dimensions:
+                dimensions.append(value)
+        fps_values = [self.video_gif_fps, 8, 6]
+        last_error = "未知错误"
+        for index, dimension in enumerate(dimensions):
+            fps = fps_values[min(index, len(fps_values) - 1)]
+            output_path = self.temp_dir / f"kkt_video_gif_{int(time.time() * 1000)}_{dimension}.gif"
+            filter_graph = (
+                f"[0:v]fps={fps},scale={dimension}:{dimension}:"
+                "force_original_aspect_ratio=decrease:flags=lanczos,split[a][b];"
+                "[a]palettegen=max_colors=256:stats_mode=diff[p];"
+                "[b][p]paletteuse=dither=sierra2_4a"
+            )
+            command = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                source_path,
+                "-t",
+                str(min(duration, float(self.video_gif_max_duration))),
+                "-filter_complex",
+                filter_graph,
+                "-an",
+                "-loop",
+                "0",
+                str(output_path),
+            ]
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+                if process.returncode != 0 or not output_path.is_file():
+                    last_error = stderr.decode("utf-8", errors="replace")[:200]
+                    output_path.unlink(missing_ok=True)
+                    continue
+                size = output_path.stat().st_size
+                if size > self.video_gif_max_bytes:
+                    logger.warning(
+                        "[kkt] kkgif 输出过大，降低参数: dimension=%d fps=%d bytes=%d limit=%d",
+                        dimension,
+                        fps,
+                        size,
+                        self.video_gif_max_bytes,
+                    )
+                    output_path.unlink(missing_ok=True)
+                    continue
+                return str(output_path), duration, dimension, fps
+            except asyncio.TimeoutError:
+                output_path.unlink(missing_ok=True)
+                last_error = "ffmpeg timeout"
+            except FileNotFoundError as exc:
+                raise RuntimeError("系统未安装 ffmpeg/ffprobe") from exc
+        raise RuntimeError(f"GIF 转换失败: {last_error}")
+
+    async def _convert_media_to_zip_gif(
+        self,
+        source_path: str,
+        *,
+        level: int,
+        source_kind: str,
+    ) -> tuple[str, float, int, int, int]:
+        """Compress video or GIF to meme-style GIF by preset level (1-5)."""
+        level = max(1, min(5, int(level)))
+        preset = self._KKGIFZIP_PRESETS[level]
+        base_dimension = int(preset["dimension"])
+        base_fps = int(preset["fps"])
+        base_colors = int(preset["colors"])
+
+        if source_kind == "video":
+            duration = await self._probe_video_duration(source_path)
+            if duration > self.video_gif_max_duration + 0.05:
+                raise RuntimeError("视频超过 16 秒")
+            time_limit = min(duration, float(self.video_gif_max_duration))
+        else:
+            try:
+                duration = await self._probe_video_duration(source_path)
+            except Exception:
+                duration = 0.0
+            time_limit = None
+            if duration > self.video_gif_max_duration + 0.05:
+                time_limit = float(self.video_gif_max_duration)
+                duration = time_limit
+
+        attempts: list[tuple[int, int, int]] = []
+        for step in range(3):
+            dimension = max(80, base_dimension - step * 40)
+            fps = max(3, base_fps - step)
+            colors = max(32, base_colors - step * 16)
+            attempts.append((dimension, fps, colors))
+
+        last_error = "未知错误"
+        for dimension, fps, colors in attempts:
+            stamp = int(time.time() * 1000)
+            output_path = (
+                self.temp_dir / f"kkt_gifzip_{stamp}_l{level}_{dimension}.gif"
+            )
+            filter_graph = (
+                f"[0:v]fps={fps},scale={dimension}:{dimension}:"
+                "force_original_aspect_ratio=decrease:flags=lanczos,split[a][b];"
+                f"[a]palettegen=max_colors={colors}:stats_mode=diff[p];"
+                "[b][p]paletteuse=dither=bayer:bayer_scale=3"
+            )
+            command = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                source_path,
+            ]
+            if time_limit is not None:
+                command.extend(["-t", str(time_limit)])
+            command.extend(
+                [
+                    "-filter_complex",
+                    filter_graph,
+                    "-an",
+                    "-loop",
+                    "0",
+                    str(output_path),
+                ]
+            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+                if process.returncode != 0 or not output_path.is_file():
+                    last_error = stderr.decode("utf-8", errors="replace")[:200]
+                    output_path.unlink(missing_ok=True)
+                    continue
+                size = output_path.stat().st_size
+                if size > self.video_gif_max_bytes:
+                    logger.warning(
+                        "[kkt] kkgifzip 输出过大: level=%d dimension=%d fps=%d "
+                        "colors=%d bytes=%d limit=%d",
+                        level,
+                        dimension,
+                        fps,
+                        colors,
+                        size,
+                        self.video_gif_max_bytes,
+                    )
+                    output_path.unlink(missing_ok=True)
+                    continue
+                return str(output_path), float(duration or 0.0), dimension, fps, colors
+            except asyncio.TimeoutError:
+                output_path.unlink(missing_ok=True)
+                last_error = "ffmpeg timeout"
+            except FileNotFoundError as exc:
+                raise RuntimeError("系统未安装 ffmpeg/ffprobe") from exc
+        raise RuntimeError(f"GIF 压缩失败: {last_error}")
+
+    async def _handle_image_command(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ):
         group_id = str(event.get_group_id() or "").strip()
         if group_id and group_id in self.group_blacklist:
             logger.debug("[kkt] 忽略黑名单群消息: group_id=%s", group_id)
             return
 
         command = self._detect_command_name(event)
-        prompt = self._extract_prompt(event, prompt)
+        is_gif = self._is_gif_command(command)
+        prompt = self._extract_prompt(
+            event, prompt, self._command_names_for_parser()
+        )
         logger.info(
             "[kkt] 指令匹配: command=%s prompt=%r",
             command,
@@ -1664,6 +3582,7 @@ class KktImagePlugin(Star):
             logger.warning(f"[kkt] 读取引用内容失败: {exc}")
             image_items, quoted_prompt = [], ""
 
+        gif_help_requested = is_gif and self._is_help_token(prompt)
         if quoted_prompt:
             prompt = f"{quoted_prompt}\n{prompt}".strip() if prompt else quoted_prompt
         elif self._is_help_token(prompt):
@@ -1677,8 +3596,19 @@ class KktImagePlugin(Star):
             bool(quoted_prompt),
             [item.get("label") for item in image_items][:8],
         )
-        if not prompt and not image_items:
-            yield event.plain_result(self._help_text)
+        if not prompt and not image_items and not (is_gif and not gif_help_requested):
+            yield event.plain_result(self._gif_help_text if is_gif else self._help_text)
+            return
+
+        if command == "grok2" and image_items:
+            logger.info(
+                "[kkt] grok2 2K 多图/参考图拦截(不请求): count=%d labels=%s",
+                len(image_items),
+                [item.get("label") for item in image_items][:8],
+            )
+            yield event.plain_result(
+                "/grok2 是 2K 文生图模式，不支持参考图。请使用 /grok 进行图生图。"
+            )
             return
 
         # 本地 Sensitive-lexicon：三通道共用；命中则不请求、不扣配额
@@ -1687,7 +3617,9 @@ class KktImagePlugin(Star):
             yield event.plain_result(sensitive_msg)
             return
 
-        creds = self._resolve_api_credentials(command)
+        api_command = self._gif_api_command(command) if is_gif else command
+        gif_grid_size = self._gif_grid_size(command) if is_gif else 0
+        creds = self._resolve_api_credentials(api_command)
         if isinstance(creds, str):
             logger.error("[kkt] 凭证未配置: command=%s", command)
             yield event.plain_result(creds)
@@ -1696,9 +3628,9 @@ class KktImagePlugin(Star):
 
         # image2 + Images API：多参考图会静默丢弃，直接拦截以免浪费额度
         if (
-            command == "image2"
+            api_command == "image2"
             and len(image_items) > 1
-            and self._should_use_images_api(command, model)
+            and self._should_use_images_api(api_command, model)
         ):
             reject_msg = self._format_image2_multi_ref_reject(image_items)
             logger.info(
@@ -1716,7 +3648,7 @@ class KktImagePlugin(Star):
             return
 
         # 分通道日限额：仅检查，成功出图后再记账（失败不扣）
-        billing_channel = self._channel_for_command(command)
+        billing_channel = self._channel_for_command(api_command)
         quota_msg = await self._check_channel_quota(event, billing_channel)
         if quota_msg:
             yield event.plain_result(quota_msg)
@@ -1728,8 +3660,18 @@ class KktImagePlugin(Star):
         # 开始干活前先表情回应原消息（不阻塞生图）
         asyncio.create_task(self._send_reaction_emoji(event))
         # 普通消息提示进度，不引用原消息
-        await event.send(event.plain_result("正在生成图片，马上就好喵"))
+        image_start_notice = "正在生成图片，马上就好喵"
+        frame_notice = self._animated_reference_notice(image_items)
+        if frame_notice:
+            image_start_notice += f"\n{frame_notice}"
+        await event.send(event.plain_result(image_start_notice))
         started_at = time.monotonic()
+        task_id = self._start_task_log(
+            channel=billing_channel,
+            command=command,
+            prompt=prompt,
+            model=model,
+        )
 
         try:
             logger.info(
@@ -1744,47 +3686,383 @@ class KktImagePlugin(Star):
                 self.image2_api_mode if command == "image2" else "n/a",
             )
             result = await self._request_image(
-                prompt,
+                self._build_gif_prompt(prompt, gif_grid_size) if is_gif else prompt,
                 image_items,
                 event,
                 api_base=api_base,
                 api_keys=api_keys,
                 model=model,
-                command=command,
+                command=api_command,
             )
             if not result:
                 logger.error("[kkt] API 调用完成但未解析出图片")
+                self._finish_task_log(
+                    task_id, status="failed", code="empty_response", progress=0
+                )
                 yield event.plain_result("API 返回中没有找到图片，请检查模型和接口响应格式。")
                 return
             image_path = await self._materialize_image(result)
             if not image_path:
+                self._finish_task_log(
+                    task_id, status="failed", code="materialize_failed", progress=0
+                )
                 yield event.plain_result("图片下载或解析失败，请稍后重试。")
                 return
+            output_path = image_path
+            if is_gif:
+                output_path, frame_count, cell_size = self._make_gif_from_grid(
+                    image_path, gif_grid_size
+                )
+                logger.info(
+                    "[kkt] GIF 分镜裁切成功: source=%s grid=%dx%d frames=%d source_cell=%d output=%s",
+                    image_path,
+                    gif_grid_size,
+                    gif_grid_size,
+                    frame_count,
+                    cell_size,
+                    output_path,
+                )
             await self._record_successful_usage(billing_channel)
             elapsed_seconds = max(1, int(round(time.monotonic() - started_at)))
             logger.info(
-                "[kkt] 图片处理成功: path=%s elapsed=%ss channel=%s",
-                image_path,
+                "[kkt] 图片处理成功: path=%s elapsed=%ss channel=%s output=%s",
+                output_path,
                 elapsed_seconds,
                 billing_channel,
+                "gif" if is_gif else "image",
+            )
+            self._finish_task_log(
+                task_id, status="success", code="completed", progress=100
             )
             yield event.chain_result(
                 self._build_image_chain(
                     event,
-                    image_path,
+                    output_path,
                     elapsed_seconds=elapsed_seconds,
                 )
             )
-            self._schedule_cleanup(image_path)
+            self._schedule_cleanup(output_path)
+            if output_path != image_path:
+                self._schedule_cleanup(image_path)
         except Exception as exc:
-            logger.error(f"[kkt] 图片生成失败: {exc}")
-            err_text = str(exc).strip() or "未知错误"
-            if err_text.startswith("上游拒绝生成："):
-                yield event.plain_result(
-                    err_text[len("上游拒绝生成：") :].strip() or err_text
+            logger.exception("[kkt] 图片生成失败: %s", exc)
+            self._finish_task_log(
+                task_id, status="failed", code=type(exc).__name__, progress=0
+            )
+            yield event.plain_result(self._safe_image_failure(exc))
+
+    @filter.command("hajimi", alias={"kkt"})
+    async def handle_hajimi(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+        """主图像通道：文生图、修图、多图参考和引用图编辑。用法：/hajimi <提示词>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("image2")
+    async def handle_image2(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+        """Image2 独立通道：Images 模式最多一张参考图。用法：/image2 <提示词>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("grok", alias={"gk"})
+    async def handle_grok(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+        """Grok Images 文生图/图生图，支持多图参考。用法：/grok <提示词>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("grok2", alias={"grok2k", "gk2", "gk2k"})
+    async def handle_grok2(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+        """Grok 2K 文生图，仅支持文字提示词，不接受参考图。用法：/grok2 <提示词>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("hajimigif", alias={"kktgif"})
+    async def handle_hajimigif(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ):
+        """主通道生成 4x4、16 帧 GIF 分镜。用法：/hajimigif <动作>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("hajimigif2")
+    async def handle_hajimigif2(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ):
+        """主通道生成 3x3、9 帧 GIF 分镜。用法：/hajimigif2 <动作>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("image2gif")
+    async def handle_image2gif(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ):
+        """Image2 通道生成 4x4、16 帧 GIF 分镜。用法：/image2gif <动作>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("image2gif2")
+    async def handle_image2gif2(
+        self, event: AstrMessageEvent, prompt: GreedyStr = ""
+    ):
+        """Image2 通道生成 3x3、9 帧 GIF 分镜。用法：/image2gif2 <动作>。"""
+        async for result in self._handle_image_command(event, prompt):
+            yield result
+
+    @filter.command("kkt帮助", alias=_DEFAULT_HELP_ALIASES)
+    async def handle_help(self, event: AstrMessageEvent):
+        """查看康康图全部主指令、GIF 指令和当前生效别名。"""
+        event.stop_event()
+        groups = self._command_help_groups()
+        basic_text = build_basic_help_text(groups)
+        alias_text = build_alias_help_text(groups)
+        try:
+            self_id = str(event.get_self_id() or "0")
+            await event.send(
+                MessageChain(
+                    [
+                        Comp.Nodes(
+                            [
+                                Comp.Node(
+                                    content=[Comp.Plain(basic_text)],
+                                    name="康康图",
+                                    uin=self_id,
+                                ),
+                                Comp.Node(
+                                    content=[Comp.Plain(alias_text)],
+                                    name="康康图·别名",
+                                    uin=self_id,
+                                ),
+                            ]
+                        )
+                    ]
                 )
-            else:
-                yield event.plain_result(f"图片生成失败：{err_text}")
+            )
+        except Exception as exc:
+            logger.warning("[kkt] 帮助合并转发发送失败，回退文本: %s", exc)
+            yield event.plain_result(f"{basic_text}\n\n{alias_text}")
+
+    @filter.command(
+        "grokvideo",
+        alias={"grokv", "gkv", "gv"}
+        | {f"grokv{i}" for i in range(100)}
+        | {f"gkv{i}" for i in range(100)}
+        | {f"gv{i}" for i in range(100)},
+    )
+    async def handle_grokv(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
+        """Grok2API 异步文生/图生视频，支持 1-15 秒和一张首帧参考图。"""
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id and group_id in self.group_blacklist:
+            logger.debug("[kkt] video 忽略黑名单群: group_id=%s", group_id)
+            return
+
+        event.stop_event()
+        prompt = self._extract_prompt(
+            event, prompt, self._command_names_for_parser()
+        )
+        duration_seconds, prompt, duration_error = self._parse_grokv_duration(
+            event,
+            prompt,
+            self.video_duration,
+            self._command_names_for_key("video"),
+        )
+        if duration_error:
+            yield event.plain_result(duration_error)
+            return
+        prompt_stripped = (prompt or "").strip()
+        if self._is_help_token(prompt_stripped) or prompt_stripped.lower() in {
+            "help",
+            "帮助",
+            "?",
+        }:
+            yield event.plain_result(self._video_help_text)
+            return
+
+        image_items, quoted_prompt = await self._collect_images(event)
+        if not prompt_stripped and quoted_prompt:
+            prompt_stripped = quoted_prompt.strip()
+            prompt = prompt_stripped
+
+        if not prompt_stripped and not image_items:
+            yield event.plain_result(self._video_help_text)
+            return
+
+        if len(image_items) > 1:
+            logger.info(
+                "[kkt] video multi-ref reject: count=%d sources=%s",
+                len(image_items),
+                [item.get("source") for item in image_items][:8],
+            )
+            yield event.plain_result(
+                f"每次只能用一张参考图作为首帧，当前收到 {len(image_items)} 张。"
+                "请只保留一张图（附图、回复图或@头像）后重试。"
+            )
+            return
+
+        sensitive_msg = self._check_sensitive_prompt(prompt_stripped)
+        if sensitive_msg:
+            yield event.plain_result(sensitive_msg)
+            return
+
+        if not self.video_api_base:
+            yield event.plain_result(
+                "未配置 video_api_base。请在插件配置中填写 grok2api 地址。"
+            )
+            return
+        video_keys = self._build_key_chain(
+            self.video_api_key, self.video_backup_api_keys
+        )
+        if not video_keys:
+            yield event.plain_result(
+                "未配置 video_api_key。请在插件配置中填写 grok2api 客户端密钥。"
+            )
+            return
+
+        cd_msg = self._check_video_cooldown(event)
+        if cd_msg:
+            yield event.plain_result(cd_msg)
+            return
+
+        billing_channel = self._CHANNEL_VIDEO
+        quota_msg = await self._check_channel_quota(event, billing_channel)
+        if quota_msg:
+            yield event.plain_result(quota_msg)
+            return
+
+        ok, slot_msg = await self._try_acquire_video_slot(event)
+        if not ok:
+            yield event.plain_result(slot_msg or "视频队列已满，请稍后再试。")
+            return
+
+        self._mark_video_cooldown(event)
+        asyncio.create_task(self._send_reaction_emoji(event))
+        video_start_notice = "喵呜～视频已经开始生成啦，可能要等几分钟，请耐心等我一下喵～"
+        frame_notice = self._animated_reference_notice(image_items)
+        if frame_notice:
+            video_start_notice += f"\n{frame_notice}"
+        try:
+            await event.send(event.plain_result(video_start_notice))
+        except Exception as exc:
+            logger.warning("[kkt] video start notice send failed, continue task: %s", exc)
+        image_url = None
+        if image_items:
+            image_url = str(image_items[0].get("data_url") or "").strip() or None
+        final_prompt = self._compose_video_prompt(
+            prompt_stripped,
+            has_ref_image=bool(image_url),
+            duration=duration_seconds,
+        )
+        started_at = time.monotonic()
+        task_id = self._start_task_log(
+            channel=billing_channel,
+            command="grokvideo",
+            prompt=prompt_stripped or final_prompt,
+            model=self.video_model,
+        )
+
+        async def on_video_progress(progress: int, status: str) -> None:
+            if status == "pending":
+                self._update_task_log(task_id, progress=progress)
+
+        try:
+            video_aspect_ratio = (
+                self._video_aspect_ratio_for_image(image_items[0])
+                if image_items else self.video_aspect_ratio
+            )
+            logger.info(
+                "[kkt] grokvideo start: model=%s base=%s duration=%s ar=%s res=%s "
+                "prompt_len=%d final_prompt_len=%d enhance=%s has_image=%s "
+                "keys=%d timeout=%ds",
+                self.video_model,
+                self.video_api_base,
+                duration_seconds,
+                video_aspect_ratio,
+                self.video_resolution,
+                len(prompt_stripped),
+                len(final_prompt),
+                self.video_prompt_enhance,
+                bool(image_url),
+                len(video_keys),
+                self.video_timeout,
+            )
+            client = GrokVideoClient(
+                self.video_api_base,
+                poll_interval=float(self.video_poll_interval),
+                timeout=float(self.video_timeout),
+            )
+            result, content, ctype = await client.generate(
+                video_keys,
+                model=self.video_model,
+                prompt=final_prompt,
+                duration=duration_seconds,
+                aspect_ratio=video_aspect_ratio,
+                resolution=self.video_resolution,
+                image_url=image_url,
+                on_progress=on_video_progress,
+            )
+            raw_path = await self._materialize_video_bytes(content, ctype)
+            video_path = await self._transcode_video_for_qq(raw_path)
+            await self._record_successful_usage(billing_channel)
+            elapsed_seconds = max(1, int(round(time.monotonic() - started_at)))
+            send_size = (
+                Path(video_path).stat().st_size
+                if Path(video_path).is_file()
+                else len(content)
+            )
+            logger.info(
+                "[kkt] video success: request_id=%s raw=%s send=%s bytes=%d elapsed=%ss",
+                result.request_id,
+                raw_path,
+                video_path,
+                send_size,
+                elapsed_seconds,
+            )
+            # link_resolver Direct Send：await event.send，不 yield 进装饰链
+            try:
+                await self._send_video_direct(
+                    event,
+                    video_path,
+                    elapsed_seconds=elapsed_seconds,
+                )
+                self._finish_task_log(
+                    task_id,
+                    status="success",
+                    code="completed",
+                    progress=100,
+                    request_id=result.request_id,
+                )
+            finally:
+                # 发送完成（或失败）后再删，避免边发边删
+                for p in {raw_path, video_path}:
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                logger.debug(
+                    "[kkt] video temp cleaned after send: raw=%s send=%s",
+                    raw_path,
+                    video_path,
+                )
+        except GrokVideoError as exc:
+            logger.error(
+                "[kkt] video failed: code=%s status=%s msg=%s",
+                exc.code,
+                exc.status,
+                str(exc)[:300],
+            )
+            self._finish_task_log(
+                task_id,
+                status="failed",
+                code=exc.code or "generation_failed",
+                progress=0,
+            )
+            yield event.plain_result(self._safe_video_failure(exc))
+        except Exception as exc:
+            logger.exception("[kkt] video unexpected error: %s", exc)
+            self._finish_task_log(
+                task_id, status="failed", code=type(exc).__name__, progress=0
+            )
+            yield event.plain_result("视频生成失败，请稍后重试。")
+        finally:
+            await self._release_video_slot(event)
 
     async def _collect_images(
         self, event: AstrMessageEvent
@@ -1816,13 +4094,48 @@ class KktImagePlugin(Star):
             except Exception as exc:
                 logger.warning(f"[kkt] 图片转 Base64 失败: {exc}")
                 return
+            data_url = f"data:image/jpeg;base64,{encoded}"
+            animated_frame = ""
+            try:
+                raw_bytes = base64.b64decode(encoded)
+                with Image.open(io.BytesIO(raw_bytes)) as opened:
+                    frame_count = int(getattr(opened, "n_frames", 1) or 1)
+                    if frame_count > 1:
+                        if self.animated_reference_frame == "末帧":
+                            frame_index = frame_count - 1
+                        elif self.animated_reference_frame == "中间帧":
+                            frame_index = (frame_count - 1) // 2
+                        else:
+                            frame_index = 0
+                        opened.seek(frame_index)
+                        frame = opened.convert("RGBA")
+                        buffer = io.BytesIO()
+                        frame.save(buffer, format="PNG")
+                        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                        data_url = f"data:image/png;base64,{encoded}"
+                        animated_frame = (
+                            f"{self.animated_reference_frame}"
+                            f"（第{frame_index + 1}/{frame_count}帧）"
+                        )
+                        logger.info(
+                            "[kkt] 动图参考图抽帧: source=%s mode=%s frame=%d/%d",
+                            source,
+                            self.animated_reference_frame,
+                            frame_index + 1,
+                            frame_count,
+                        )
+            except Exception as exc:
+                logger.debug("[kkt] 参考图动图检测失败，保留原始数据: %s", exc)
+            item = {
+                "data_url": data_url,
+                "source": source,
+                "qq": qq,
+                "name": name,
+            }
+            if animated_frame:
+                item["animated_frame"] = animated_frame
             images.append(
-                {
-                    "data_url": f"data:image/jpeg;base64,{encoded}",
-                    "source": source,
-                    "qq": qq,
-                    "name": name,
-                }
+                item
             )
 
         current_images: list = []
@@ -2081,6 +4394,69 @@ class KktImagePlugin(Star):
             return f"{self.style_prompt}\n\n用户指令：{body}"
         return body
 
+    @staticmethod
+    def _default_video_prompt_for_ref() -> str:
+        """空 prompt + 仅参考图时的中性默认指令（人/动物/静物/风景通用）。"""
+        return (
+            "参考图中的主体自然轻微动起来，镜头稳定；"
+            "有生物则做轻微呼吸、眨眼或摆动等小动作，"
+            "是静物或风景则做轻风、光影、云雾等缓慢环境变化；"
+            "不要擅自添加新角色或改掉主体外观。"
+        )
+
+    def _compose_video_prompt(
+        self,
+        prompt: str,
+        *,
+        has_ref_image: bool = False,
+        duration: int | None = None,
+    ) -> str:
+        """为 /grokvideo 拼装静态前缀 + 用户指令（与生图 style_prompt 分离）。"""
+        body = (prompt or "").strip()
+        if not body:
+            body = (
+                self._default_video_prompt_for_ref()
+                if has_ref_image
+                else "请生成一段简短自然的视频"
+            )
+        if not self.video_prompt_enhance:
+            return body
+
+        dur = max(1, min(15, int(duration or self.video_duration or 8)))
+        parts: list[str] = []
+        if has_ref_image:
+            subject_line = (
+                "1) 主体一致：严格以参考图为首帧，还原主体外观、画风、材质与场景，"
+                "只增加合理动作与镜头运动；不要擅自添加新角色或改掉主体。"
+            )
+        else:
+            subject_line = (
+                "1) 主体一致：全程保持同一主体的外观与身份，按用户文字构建场景。"
+            )
+        parts.append(
+            "【视频生成约束】"
+            f"{subject_line}"
+            "2) 运动连贯：动作物理可信，禁止瞬移、结构崩坏、多头多肢、脸部/形体融化。"
+            "3) 镜头稳定：以稳定画面为主，可轻推/轻摇；避免剧烈抖动、乱切、闪帧。"
+            f"4) 时序：约 {dur} 秒内完成用户描述的动作，节奏自然，可轻微缓入缓出。"
+            "5) 画面干净：不无故添加字幕、水印、UI 边框；用户明确要求文字时再出现。"
+        )
+        if self.prefer_chinese_text:
+            parts.append(
+                "【画面文字】若出现可读文字（字幕、招牌、UI），默认简体中文；"
+                "仅当用户明确要求其他语言或专有名词需保留原文时除外。"
+            )
+        if self.prefer_cn_locale and not has_ref_image:
+            parts.append(
+                "【人物默认·仅文生且未指定时】人物外貌可略偏东亚常见特征；"
+                "用户已指定种族/角色/画风时以用户为准。有参考图时本条不适用。"
+            )
+        custom = str(getattr(self, "video_style_prompt", "") or "").strip()
+        if custom:
+            parts.append(custom)
+        prefix = "\n".join(parts).strip()
+        return f"{prefix}\n\n用户指令：{body}"
+
     async def _request_image(
         self,
         prompt: str,
@@ -2110,6 +4486,24 @@ class KktImagePlugin(Star):
         if not key_chain:
             raise RuntimeError("未配置可用 API Key")
 
+        # Grok 图片模型必须走 grok2api 的 Images API；该接口支持 images 数组多图参考。
+        if command == "grok":
+            return await self._request_grok_image_via_images_api(
+                prompt,
+                image_items,
+                api_base=use_base,
+                api_keys=key_chain,
+                resolution="1k",
+            )
+        if command == "grok2":
+            return await self._request_grok_image_via_images_api(
+                prompt,
+                image_items,
+                api_base=use_base,
+                api_keys=key_chain,
+                resolution="2k",
+            )
+
         # 关键隔离：只有 image2 且配置/模型需要时才走 images API
         if self._should_use_images_api(command, use_model):
             return await self._request_image_via_images_api(
@@ -2127,6 +4521,123 @@ class KktImagePlugin(Star):
             api_keys=key_chain,
             model=use_model,
         )
+
+    async def _request_grok_image_via_images_api(
+        self,
+        prompt: str,
+        image_items: list[dict],
+        *,
+        api_base: str,
+        api_keys: list[str],
+        resolution: str = "1k",
+    ) -> str | None:
+        """Call grok2api's JSON image generation/edit endpoints.
+
+        The public model list hides provider prefixes, while Chat Completions
+        may resolve the same bare name to the wrong provider. Images API is the
+        actual capability contract for this model and accepts multiple images.
+        """
+        endpoint = (
+            f"{api_base.rstrip('/')}/images/edits"
+            if image_items
+            else f"{api_base.rstrip('/')}/images/generations"
+        )
+        body: dict[str, object] = {
+            "model": self._GROK_IMAGE_MODEL,
+            "prompt": self._compose_images_prompt(prompt),
+            "n": 1,
+            "resolution": resolution,
+            "response_format": "url",
+            "stream": False,
+        }
+        if image_items:
+            body["images"] = [
+                {"url": str(item.get("data_url") or "")}
+                for item in image_items
+            ]
+
+        last_error = "未知错误"
+        logger.info(
+            "[kkt] grok images 请求准备: endpoint=%s model=%s key_count=%d "
+            "ref_images=%d prompt_length=%d",
+            endpoint,
+            self._GROK_IMAGE_MODEL,
+            len(api_keys),
+            len(image_items),
+            len(str(body["prompt"])),
+        )
+        for key_index, use_key in enumerate(api_keys):
+            key_label = "primary" if key_index == 0 else f"backup#{key_index}"
+            key_mask = self._mask_secret(use_key)
+            for attempt in range(self.max_retry + 1):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=self.timeout)
+                    headers = {
+                        "Authorization": f"Bearer {use_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    }
+                    logger.info(
+                        "[kkt] grok images API 发送: key=%s mask=%s attempt=%d/%d",
+                        key_label,
+                        key_mask,
+                        attempt + 1,
+                        self.max_retry + 1,
+                    )
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.post(
+                            endpoint, headers=headers, json=body
+                        ) as response:
+                            raw = await response.text()
+                            logger.info(
+                                "[kkt] grok images API 响应: key=%s attempt=%d status=%d bytes=%d",
+                                key_label,
+                                attempt + 1,
+                                response.status,
+                                len(raw),
+                            )
+                            image, err = self._handle_images_http_response(
+                                response.status, raw
+                            )
+                            if image:
+                                image = resolve_media_url(api_base, image)
+                                logger.info(
+                                    "[kkt] grok 图片解析成功: key=%s source=%s",
+                                    key_label,
+                                    "data_url" if image.startswith("data:") else "url",
+                                )
+                                return image
+                            last_error = err or "API 响应中未找到图片"
+                            raise RuntimeError(last_error)
+                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
+                    last_error = str(exc)
+                    logger.error(
+                        "[kkt] grok images API 失败: key=%s attempt=%d error=%s",
+                        key_label,
+                        attempt + 1,
+                        last_error[:300],
+                    )
+                    if self._is_non_retryable_api_error(last_error):
+                        raise RuntimeError(last_error) from exc
+                    if self._should_switch_api_key(last_error):
+                        break
+                    if attempt < self.max_retry:
+                        await asyncio.sleep(self.retry_delay)
+                        continue
+                    break
+            if key_index + 1 < len(api_keys):
+                logger.warning(
+                    "[kkt] grok images 切换备用 Key: from=%s next_index=%d/%d last_error=%s",
+                    key_label,
+                    key_index + 2,
+                    len(api_keys),
+                    last_error[:200],
+                )
+                if self.retry_delay > 0:
+                    await asyncio.sleep(self.retry_delay)
+                continue
+            raise RuntimeError(last_error)
+        return None
 
     async def _request_image_via_images_api(
         self,

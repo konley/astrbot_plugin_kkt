@@ -2,10 +2,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.ruff_cache/
 .test_data/
 *.egg-info/
 .venv/
 venv/
+# 运行时本地数据（AstrBot 会写到 data/，勿入库）
+data/
 # 敏感词库不随仓库分发（用户自行下载 Sensitive-lexicon）
 Sensitive-lexicon/
 **/Sensitive-lexicon/

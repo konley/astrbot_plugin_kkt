@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KKT Studio</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark">K</div>
+          <div>
+            <div class="overline">ASTRBOT / MEDIA ROUTER</div>
+            <h1>KKT Studio</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span id="save-state" class="save-state">未读取</span>
+          <button id="refresh-btn" class="button button-muted" type="button">刷新</button>
+          <button id="save-btn" class="button button-primary" type="button">保存全部设置</button>
+        </div>
+      </header>
+
+      <div class="page-grid">
+        <aside class="side-nav" aria-label="控制台导航">
+          <div class="nav-caption">WORKSPACE</div>
+          <a class="nav-link active" href="#overview"><span>01</span>控制台</a>
+          <a class="nav-link" href="#commands"><span>02</span>指令别名</a>
+          <a class="nav-link" href="#channels"><span>03</span>通道与密钥</a>
+          <a class="nav-link" href="#generation"><span>04</span>生成设置</a>
+          <a class="nav-link" href="#limits"><span>05</span>额度与审核</a>
+          <a class="nav-link" href="#tasks"><span>06</span>任务日志</a>
+          <div class="nav-rule"></div>
+          <div class="nav-caption">RUNTIME</div>
+          <div class="runtime-chip"><i class="status-dot"></i><span>配置保存后需重载插件</span></div>
+          <div class="runtime-chip"><i class="status-dot amber"></i><span>连接测试不会创建任务</span></div>
+          <div class="side-footer">KKT Studio <span id="footer-version">0.17.0</span></div>
+        </aside>
+
+        <main class="main-content">
+          <section id="overview" class="hero panel">
+            <div class="hero-copy">
+              <div class="overline accent">康康图控制台</div>
+              <h2>把每个媒体通道，<br /><em>调成顺手的样子。</em></h2>
+              <p>四条主行为、可配置别名、完整普通配置和任务状态集中在这里。视频增强提示词、Grok 通道复用关系也会和插件实际运行配置保持一致。</p>
+              <div id="hero-commands" class="command-pills" aria-label="常用指令"></div>
+            </div>
+            <div class="pulse-card">
+              <div class="pulse-top"><span class="live-dot"></span><span>运行脉搏</span><small id="updated-at">--</small></div>
+              <div id="video-inflight" class="pulse-number">0<span>/0</span></div>
+              <div class="pulse-label">视频任务占用 / 全局并发</div>
+              <div class="pulse-track"><i id="video-bar"></i></div>
+              <p id="runtime-note">正在读取运行状态…</p>
+            </div>
+          </section>
+
+          <section id="commands" class="section-block">
+            <div class="section-head">
+              <div><span class="section-number">02</span><h3>指令别名</h3></div>
+              <p>主指令固定注册到 AstrBot 行为表；别名可填多个，逗号或换行分隔。</p>
+            </div>
+            <div id="command-catalog" class="command-catalog"></div>
+            <div class="alias-form panel">
+              <div class="subhead"><strong>自定义别名</strong><span>默认别名始终保留，冲突名称会被忽略并写入日志。</span></div>
+              <div class="form-grid alias-grid">
+                <label>主图像 /hajimi<textarea id="main_command_aliases" rows="2" placeholder="kkt&#10;paint"></textarea></label>
+                <label>Image2 /image2<textarea id="image2_command_aliases" rows="2" placeholder="img2"></textarea></label>
+                <label>Grok 生图 /grok<textarea id="grok_command_aliases" rows="2" placeholder="gk"></textarea></label>
+                <label>Grok 2K /grok2<textarea id="grok2_command_aliases" rows="2" placeholder="grok2k&#10;gk2"></textarea></label>
+                <label>Grok 视频 /grokvideo<textarea id="video_command_aliases" rows="2" placeholder="grokv&#10;gkv&#10;gv"></textarea></label>
+                <label>主通道 16 帧 /hajimigif<textarea id="main_gif_aliases" rows="2" placeholder="kktgif"></textarea></label>
+                <label>主通道 9 帧 /hajimigif2<textarea id="main_gif2_aliases" rows="2"></textarea></label>
+                <label>Image2 16 帧 /image2gif<textarea id="image2_gif_aliases" rows="2"></textarea></label>
+                <label>Image2 9 帧 /image2gif2<textarea id="image2_gif2_aliases" rows="2"></textarea></label>
+              </div>
+            </div>
+          </section>
+
+          <section id="channels" class="section-block">
+            <div class="section-head">
+              <div><span class="section-number">03</span><h3>通道与密钥</h3></div>
+              <p>密钥只写入，不回显。Grok 生图和视频相邻排列，视频字段留空时复用生图通道。</p>
+            </div>
+            <div class="channel-grid">
+              <article class="channel-card main-card">
+                <div class="card-kicker"><span class="channel-symbol">◎</span><span>MAIN IMAGE</span><i id="main-key-dot" class="key-dot"></i></div>
+                <h4>主图像</h4>
+                <p class="channel-route">/hajimi · /kkt</p>
+                <label>API 基址<input id="api_base" type="url" placeholder="https://host/v1" /></label>
+                <label>模型<input id="model" type="text" placeholder="gemini-3.1-flash-image" /></label>
+                <label>主 API Key<input id="api_key" type="password" autocomplete="off" placeholder="留空表示保持现有 Key" /></label>
+                <label>备用 Key（每行一个）<textarea id="backup_api_keys" rows="3" placeholder="不会回显已保存的 Key"></textarea></label>
+                <div class="card-foot"><span id="main-test-result">未测试</span><button class="text-button test-btn" data-channel="main" type="button">测试连接 →</button></div>
+              </article>
+
+              <article class="channel-card image2-card">
+                <div class="card-kicker"><span class="channel-symbol">▣</span><span>IMAGE2</span><i id="image2-key-dot" class="key-dot"></i></div>
+                <h4>Image2</h4>
+                <p class="channel-route">/image2 · 独立 Key</p>
+                <label>API 基址<input id="image2_api_base" type="url" placeholder="留空复用主图像基址" /></label>
+                <label>模型<input id="image2_model" type="text" placeholder="gpt-image-2" /></label>
+                <label>Image2 API Key<input id="image2_api_key" type="password" autocomplete="off" placeholder="独立 Key，不回退主 Key" /></label>
+                <label>备用 Key（每行一个）<textarea id="image2_backup_api_keys" rows="3" placeholder="不会回显已保存的 Key"></textarea></label>
+                <div class="form-grid compact-two">
+                  <label>接口模式<select id="image2_api_mode"><option value="images">Images</option><option value="chat">Chat</option><option value="auto">Auto</option></select></label>
+                  <label>尺寸<input id="image2_size" type="text" placeholder="1024x1024" /></label>
+                </div>
+                <div class="card-foot"><span id="image2-test-result">未测试</span><button class="text-button test-btn" data-channel="image2" type="button">测试连接 →</button></div>
+              </article>
+
+              <div class="grok-pair">
+                <div class="pair-heading"><span>GROK FAMILY</span><small>先生图，后视频 · 视频可复用生图配置</small></div>
+                <article class="channel-card grok-card">
+                  <div class="card-kicker"><span class="channel-symbol">✦</span><span>GROK IMAGES</span><i id="grok-key-dot" class="key-dot"></i></div>
+                  <h4>Grok 生图</h4>
+                  <p class="channel-route">/grok · /gk · /grok2</p>
+                  <label>API 基址<input id="grok_api_base" type="url" placeholder="留空复用主图像基址" /></label>
+                  <label>Grok API Key<input id="grok_api_key" type="password" autocomplete="off" placeholder="留空复用主图像 Key" /></label>
+                  <label>备用 Key（每行一个）<textarea id="grok_backup_api_keys" rows="3" placeholder="不会回显已保存的 Key"></textarea></label>
+                  <p class="field-note">固定模型：grok-imagine-image-quality。支持多图编辑和 1K/2K 模式。</p>
+                  <div class="card-foot"><span id="grok-test-result">未测试</span><button class="text-button test-btn" data-channel="grok" type="button">测试连接 →</button></div>
+                </article>
+                <article class="channel-card video-card">
+                  <div class="card-kicker"><span class="channel-symbol">◒</span><span>GROK VIDEO</span><i id="video-key-dot" class="key-dot"></i></div>
+                  <h4>Grok 视频</h4>
+                  <p class="channel-route">/grokvideo · /grokv · /gkv · /gv</p>
+                  <label>API 基址<input id="video_api_base" type="url" placeholder="留空复用 Grok 生图基址" /></label>
+                  <label>视频 API Key<input id="video_api_key" type="password" autocomplete="off" placeholder="留空复用 Grok 生图 Key" /></label>
+                  <label>备用 Key（每行一个）<textarea id="video_backup_api_keys" rows="3" placeholder="留空复用 Grok 生图备用 Key"></textarea></label>
+                  <label>视频模型<input id="video_model" type="text" placeholder="Web/grok-imagine-video" /></label>
+                  <p id="video-fallback-note" class="field-note fallback-note">视频地址和 Key 留空时复用 Grok 生图通道。</p>
+                  <div class="card-foot"><span id="video-test-result">未测试</span><button class="text-button test-btn" data-channel="video" type="button">测试连接 →</button></div>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <section id="generation" class="section-block">
+            <div class="section-head">
+              <div><span class="section-number">04</span><h3>生成与输入</h3></div>
+              <p>页面字段与普通配置面板一一对应，保存后重载插件生效。</p>
+            </div>
+            <div class="settings-layout">
+              <div class="settings-column">
+                <section class="settings-card panel">
+                  <div class="subhead"><strong>视频默认值</strong><span>/grokvideo 未指定时使用</span></div>
+                  <div class="form-grid three">
+                    <label>时长（秒）<input id="video_duration" type="number" min="1" max="15" /></label>
+                    <label>宽高比<select id="video_aspect_ratio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>3:2</option><option>2:3</option></select></label>
+                    <label>分辨率<select id="video_resolution"><option>480p</option><option>720p</option><option>1080p</option></select></label>
+                  </div>
+                  <div class="form-grid four setting-gap">
+                    <label>轮询间隔<input id="video_poll_interval" type="number" min="1" max="30" /></label>
+                    <label>超时（秒）<input id="video_timeout" type="number" min="60" /></label>
+                    <label>全局并发<input id="video_max_concurrent" type="number" min="1" max="20" /></label>
+                    <label>每用户并发<input id="video_max_concurrent_per_user" type="number" min="1" max="5" /></label>
+                  </div>
+                  <div class="form-grid two setting-gap">
+                    <label>视频冷却（秒）<input id="video_cooldown_seconds" type="number" min="0" /></label>
+                    <label>发送后清理（秒）<input id="video_cleanup_delay" type="number" min="5" /></label>
+                  </div>
+                  <label class="switch-row"><input id="video_prompt_enhance" type="checkbox" /><span><b>启用视频 Prompt 增强</b><small>追加主体一致、动作连贯、镜头和时序约束。</small></span></label>
+                  <label>视频额外提示词<textarea id="video_style_prompt" rows="4" placeholder="例如：禁止快速切镜，保持主体在画面中央"></textarea></label>
+                </section>
+
+                <section class="settings-card panel">
+                  <div class="subhead"><strong>通用请求</strong><span>重试只影响上游请求，不会重复记账</span></div>
+                  <div class="form-grid four">
+                    <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.1" /></label>
+                    <label>图片超时（秒）<input id="timeout" type="number" min="10" /></label>
+                    <label>失败重试次数<input id="max_retry" type="number" min="0" max="5" /></label>
+                    <label>重试间隔（秒）<input id="retry_delay" type="number" min="0" /></label>
+                  </div>
+                </section>
+              </div>
+
+              <div class="settings-column">
+                <section class="settings-card panel">
+                  <div class="subhead"><strong>图片输入与提示词</strong><span>参考图按引用 → 当前消息 → @头像收集</span></div>
+                  <div class="form-grid two">
+                    <label>动图参考帧<select id="animated_reference_frame"><option>首帧</option><option>中间帧</option><option>末帧</option></select></label>
+                    <label class="switch-row inline"><input id="enable_reply_image" type="checkbox" /><span>启用回复图片</span></label>
+                    <label class="switch-row inline"><input id="enable_at_avatar" type="checkbox" /><span>启用 @头像</span></label>
+                    <label class="switch-row inline"><input id="label_images" type="checkbox" /><span>给多图加顺序标签</span></label>
+                    <label class="switch-row inline"><input id="prefer_chinese_text" type="checkbox" /><span>图内文字默认中文</span></label>
+                    <label class="switch-row inline"><input id="prefer_cn_locale" type="checkbox" /><span>轻量本地化软约束</span></label>
+                    <label class="switch-row inline"><input id="reply_with_quote" type="checkbox" /><span>出图时引用原指令</span></label>
+                  </div>
+                  <label>生图额外提示词<textarea id="style_prompt" rows="5" placeholder="追加到主图像和 Image2 请求的风格或约束"></textarea></label>
+                </section>
+
+                <section class="settings-card panel">
+                  <div class="subhead"><strong>消息回应</strong><span>QQ/NapCat 不支持时自动跳过</span></div>
+                  <div class="form-grid three">
+                    <label class="switch-row inline"><input id="reaction_emoji_enabled" type="checkbox" /><span>触发表情回应</span></label>
+                    <label>回应策略<select id="reaction_emoji_strategy"><option>随机</option><option>顺序循环</option></select></label>
+                    <label>表情 ID（逗号分隔）<input id="reaction_emoji_list" type="text" placeholder="147" /></label>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+
+          <section id="limits" class="section-block">
+            <div class="section-head">
+              <div><span class="section-number">05</span><h3>额度、媒体与审核</h3></div>
+              <p>成功生成才记账；0 表示不限制。管理员命令的运行时覆盖优先于这里的默认值。</p>
+            </div>
+            <div class="limits-grid">
+              <section class="settings-card panel">
+                <div class="subhead"><strong>今日额度与费用</strong><span>预估单价仅用于管理提示</span></div>
+                <div class="quota-strip">
+                  <div><small>主图像</small><strong id="quota-main">--</strong><span id="cost-main">--</span></div>
+                  <div><small>Image2</small><strong id="quota-image2">--</strong><span id="cost-image2">--</span></div>
+                  <div><small>视频</small><strong id="quota-video">--</strong><span id="cost-video">--</span></div>
+                </div>
+                <div class="form-grid three">
+                  <label>普通生图冷却<input id="cooldown_seconds" type="number" min="0" /></label>
+                  <label>主通道日限额<input id="daily_quota_main" type="number" min="0" /></label>
+                  <label>Image2 日限额<input id="daily_quota_image2" type="number" min="0" /></label>
+                  <label>视频日限额<input id="daily_quota_video" type="number" min="0" /></label>
+                  <label>兼容旧总限额<input id="daily_quota" type="number" min="0" /></label>
+                  <label>群聊黑名单<textarea id="group_blacklist" rows="2" placeholder="群号，每行一个"></textarea></label>
+                </div>
+                <div class="form-grid three setting-gap">
+                  <label>主通道单价 USD<input id="cost_main_usd" type="number" min="0" step="0.0001" /></label>
+                  <label>Image2 单价 USD<input id="cost_image2_usd" type="number" min="0" step="0.0001" /></label>
+                  <label>视频单价 USD<input id="cost_video_usd" type="number" min="0" step="0.0001" /></label>
+                </div>
+              </section>
+
+              <section class="settings-card panel">
+                <div class="subhead"><strong>GIF 与临时文件</strong><span>/kkgif · /kkgifzip1-5 使用本机 FFmpeg</span></div>
+                <div class="form-grid four">
+                  <label>图片清理延迟<input id="cleanup_delay" type="number" min="5" /></label>
+                  <label>GIF 单帧尺寸<input id="gif_frame_size" type="number" min="128" max="512" /></label>
+                  <label>GIF FPS<input id="gif_fps" type="number" min="1" max="20" /></label>
+                  <label>GIF 大小上限<input id="gif_max_bytes" type="number" min="262144" /></label>
+                  <label>视频 GIF 最大时长<input id="video_gif_max_duration" type="number" min="1" max="16" /></label>
+                  <label>视频 GIF 首选尺寸<input id="video_gif_max_dimension" type="number" min="256" max="640" /></label>
+                  <label>视频 GIF 首选 FPS<input id="video_gif_fps" type="number" min="5" max="15" /></label>
+                  <label>视频 GIF 大小上限<input id="video_gif_max_bytes" type="number" min="524288" /></label>
+                </div>
+              </section>
+
+              <section class="settings-card panel moderation-card">
+                <div class="subhead"><strong>本地敏感词审核</strong><span>命中不请求上游、不扣额度</span></div>
+                <label class="switch-row"><input id="sensitive_filter_enabled" type="checkbox" /><span><b>启用本地审核</b><small>也可通过 /kkt审核 开|关 运行时切换。</small></span></label>
+                <div class="form-grid two">
+                  <label>词库目录<input id="sensitive_lexicon_path" type="text" placeholder="留空使用插件数据目录"></label>
+                  <label>词库类别<textarea id="sensitive_categories" rows="2" placeholder="留空加载全部类别"></textarea></label>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section id="tasks" class="section-block task-section">
+            <div class="section-head">
+              <div><span class="section-number">06</span><h3>任务日志</h3></div>
+              <p>只保存文本元数据，不保存图片和视频内容。</p>
+            </div>
+            <div class="task-panel panel">
+              <div class="task-toolbar"><span id="task-summary">最近任务</span><button id="task-refresh-btn" class="text-button" type="button">刷新日志 →</button></div>
+              <div class="task-table-wrap">
+                <table class="task-table">
+                  <thead><tr><th>开始时间</th><th>通道 / 指令</th><th>模型</th><th>Prompt</th><th>状态</th><th>进度</th><th>代码 / 请求 ID</th></tr></thead>
+                  <tbody id="task-list"><tr><td colspan="7" class="task-empty">正在读取任务日志…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <div id="toast" class="toast" role="status"></div>
+      <footer>KKT Studio <span id="footer-version-bottom">0.17.0</span> · 配置安全地通过 AstrBot Page bridge 传输</footer>
+    </div>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

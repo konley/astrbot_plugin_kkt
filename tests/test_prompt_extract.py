@@ -9,7 +9,6 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
-
 # ---------------------------------------------------------------------------
 # Minimal astrbot stubs so main.py can import offline
 # ---------------------------------------------------------------------------
@@ -74,7 +73,12 @@ def _install_stubs() -> None:
 
             return deco
 
+    class MessageChain:
+        def __init__(self, chain=None, **_):
+            self.chain = chain or []
+
     event_mod.AstrMessageEvent = AstrMessageEvent
+    event_mod.MessageChain = MessageChain
     event_mod.filter = _Filter()
 
     comp = types.ModuleType("astrbot.api.message_components")
@@ -105,10 +109,37 @@ def _install_stubs() -> None:
             self.chain = chain or []
             self.id = id if id is not None else kwargs.get("id")
 
+    class Video:
+        def __init__(self, file=None, path=None, url=None, **kwargs):
+            self.file = file
+            self.path = path
+            self.url = url
+
+        @classmethod
+        def fromFileSystem(cls, path, **_):
+            return cls(file=str(path), path=str(path))
+
+        @classmethod
+        def fromURL(cls, url, **_):
+            return cls(file=url, url=url)
+
+    class Node:
+        def __init__(self, content, **kwargs):
+            self.content = content
+            self.kwargs = kwargs
+
+    class Nodes:
+        def __init__(self, nodes, **kwargs):
+            self.nodes = nodes
+            self.kwargs = kwargs
+
     comp.Plain = Plain
     comp.At = At
     comp.Image = Image
     comp.Reply = Reply
+    comp.Video = Video
+    comp.Node = Node
+    comp.Nodes = Nodes
 
     star = types.ModuleType("astrbot.api.star")
 
@@ -162,8 +193,9 @@ def _install_stubs() -> None:
 
 _install_stubs()
 
-import main as kkt  # noqa: E402
 from astrbot.api import message_components as Comp  # noqa: E402
+
+import main as kkt  # noqa: E402
 
 
 class FakeEvent:
@@ -185,12 +217,52 @@ def test_cmd_arg_regex_basic():
     assert Plugin._command_arg_from_text("/kkt 一只猫") == "一只猫"
     assert Plugin._command_arg_from_text("/hajimi 一只猫") == "一只猫"
     assert Plugin._command_arg_from_text("/image2 一只猫") == "一只猫"
+    assert Plugin._command_arg_from_text("/grokv 生成 @小明 的跳舞视频") == "生成 @小明 的跳舞视频"
+    assert Plugin._command_arg_from_text("/grok 生成 @小明 的图片") == "生成 @小明 的图片"
+    assert Plugin._command_arg_from_text("/grok2k 2K图片") == "2K图片"
+    assert Plugin._command_arg_from_text("/gk2 2K图片") == "2K图片"
+    assert Plugin._command_arg_from_text("/gk2k 2K图片") == "2K图片"
+    assert Plugin._command_arg_from_text("/kkgif") == ""
+    assert Plugin._command_arg_from_text("/kkgifzip") == ""
+    assert Plugin._command_arg_from_text("/kkgifzip3") == ""
+    assert Plugin._command_arg_from_text("/kkgifzip5 帮助") == "帮助"
     assert Plugin._command_arg_from_text("kkt 一只猫") == "一只猫"
     assert Plugin._command_arg_from_text("/kkt帮助") == ""
     assert Plugin._command_arg_from_text("/kkt help") == "help"
     assert Plugin._command_arg_from_text("/image2 help") == "help"
     assert Plugin._command_arg_from_text("/kkt?") == ""
     assert Plugin._command_arg_from_text("/kkt ?") == "?"
+    assert Plugin._command_arg_from_text("/hajimigif 让主角挥手") == "让主角挥手"
+    assert Plugin._command_arg_from_text("/kktgif 吃饭") == "吃饭"
+    assert Plugin._command_arg_from_text("/hajimigif2 眨眼") == "眨眼"
+    assert Plugin._command_arg_from_text("/image2gif 跳舞") == "跳舞"
+    assert Plugin._command_arg_from_text("/image2gif2 摇摆") == "摇摆"
+
+
+def test_grokv_duration_arguments():
+    plugin = object.__new__(Plugin)
+
+    prompt = Plugin._extract_prompt(
+        FakeEvent([], "/grokv 5 一只猫跳舞"), ""
+    )
+    duration, body, error = plugin._parse_grokv_duration(
+        FakeEvent([], "/grokv 5 一只猫跳舞"), prompt, 8
+    )
+    assert (duration, body, error) == (5, "一只猫跳舞", None)
+
+    prompt = Plugin._extract_prompt(
+        FakeEvent([], "/grokv5 一只猫跳舞"), ""
+    )
+    duration, body, error = plugin._parse_grokv_duration(
+        FakeEvent([], "/grokv5 一只猫跳舞"), prompt, 8
+    )
+    assert (duration, body, error) == (5, "一只猫跳舞", None)
+
+    prompt = Plugin._extract_prompt(FakeEvent([], "/grokv 16 猫"), "")
+    duration, body, error = plugin._parse_grokv_duration(
+        FakeEvent([], "/grokv 16 猫"), prompt, 8
+    )
+    assert duration == 16 and body == "猫" and error is not None
 
 
 def test_resolve_api_credentials_image2_requires_own_key():
@@ -214,6 +286,11 @@ def test_resolve_api_credentials_image2_requires_own_key():
     base2, keys2, model2 = plugin._resolve_api_credentials("kkt")
     assert keys2 == ["default-key"]
     assert model2 == "gemini-x"
+
+    grok_base, grok_keys, grok_model = plugin._resolve_api_credentials("grok")
+    assert grok_base == "https://example.com/v1"
+    assert grok_keys == ["default-key"]
+    assert grok_model == "grok-imagine-image-quality"
 
 
 def test_strip_at_tokens():
@@ -346,10 +423,112 @@ def test_build_help_text_is_concise():
 
     help_text = build_help_text()
     assert "康康图" in help_text
-    assert "/kkt" in help_text
+    assert "/hajimi" in help_text
     assert "image2" in help_text
     assert "调整日限额" not in help_text
     assert len(help_text.splitlines()) <= 8
+
+
+def test_command_aliases_keep_defaults_and_skip_collisions():
+    aliases = Plugin._load_command_aliases(
+        {
+            "main_command_aliases": ["paint", "/draw"],
+            "image2_command_aliases": "img2",
+            "grok_command_aliases": ["paint", "grokpic"],
+            "video_command_aliases": ["movie"],
+        }
+    )
+    assert aliases["main"] == ["kkt", "paint", "draw"]
+    assert aliases["image2"] == ["img2"]
+    assert "paint" not in aliases["grok"]
+    assert "grokpic" in aliases["grok"]
+    assert aliases["video"] == ["grokv", "gkv", "gv", "movie"]
+
+    plugin = object.__new__(Plugin)
+    plugin._command_aliases = aliases
+    plugin._command_alias_map = plugin._build_command_alias_map()
+    assert plugin._command_alias_map["paint"] == "main"
+    assert plugin._command_alias_map["movie5"] == "video"
+    assert "movie5" in plugin._command_names_for_parser()
+    assert Plugin._command_arg_from_text(
+        "/paint 一只猫", plugin._command_names_for_parser()
+    ) == "一只猫"
+
+
+def test_help_text_lists_canonical_commands_and_gif_aliases():
+    plugin = object.__new__(Plugin)
+    plugin._command_aliases = Plugin._load_command_aliases(
+        {"main_command_aliases": ["paint"], "video_command_aliases": ["movie"]}
+    )
+    groups = plugin._command_help_groups()
+    basic = kkt.build_basic_help_text(groups)
+    aliases_text = kkt.build_alias_help_text(groups)
+    assert "/hajimi" in basic and "/paint" in aliases_text
+    assert "/image2" in basic
+    assert "/grok" in basic and "/gk" in aliases_text
+    assert "/grok2" in basic
+    assert "/grokvideo" in basic and "/movie" in aliases_text
+    assert "/hajimigif" in basic and "/kktgif" in aliases_text
+    assert "/image2gif2" in basic and "/kkgif" in basic
+    assert "/kkgifzip" in basic
+
+
+def test_grokvideo_canonical_duration_parser():
+    plugin = object.__new__(Plugin)
+    prompt = Plugin._extract_prompt(
+        FakeEvent([], "/grokvideo5 一只猫跳舞"),
+        "",
+        ["grokvideo", "grokvideo5", "grokv", "grokv5", "movie", "movie5"],
+    )
+    duration, body, error = plugin._parse_grokv_duration(
+        FakeEvent([], "/grokvideo5 一只猫跳舞"),
+        prompt,
+        8,
+        ["grokvideo", "grokv", "movie"],
+    )
+    assert (duration, body, error) == (5, "一只猫跳舞", None)
+
+
+def test_help_handler_sends_two_forward_nodes():
+    import asyncio
+
+    class HelpEvent:
+        def __init__(self):
+            self.sent = []
+            self.stopped = False
+
+        def stop_event(self):
+            self.stopped = True
+
+        def get_self_id(self):
+            return "123"
+
+        async def send(self, chain):
+            self.sent.append(chain)
+
+        def plain_result(self, text):
+            return text
+
+    plugin = object.__new__(Plugin)
+    plugin._command_aliases = Plugin._load_command_aliases(
+        {"main_command_aliases": ["paint"]}
+    )
+    event = HelpEvent()
+
+    async def run():
+        yielded = [item async for item in plugin.handle_help(event)]
+        return yielded
+
+    yielded = asyncio.run(run())
+    assert yielded == []
+    assert event.stopped is True
+    assert len(event.sent) == 1
+    nodes = event.sent[0].chain[0]
+    assert isinstance(nodes, Comp.Nodes)
+    assert len(nodes.nodes) == 2
+    assert "基础操作" in nodes.nodes[0].content[0].text
+    assert "当前别名" in nodes.nodes[1].content[0].text
+    assert "/paint" in nodes.nodes[1].content[0].text
 
 
 def test_format_image2_multi_ref_reject_includes_count_and_labels():
@@ -510,11 +689,15 @@ def test_channel_usage_record_and_cost(tmp_path):
     plugin.channel_limit_override_path = tmp_path / "channel_quota_limit.json"
     plugin.quota_limit_override_path = tmp_path / "daily_quota_limit.json"
     plugin._quota_lock = asyncio.Lock()
-    plugin.channel_limits = {"main": 2, "image2": 1}
+    plugin.channel_limits = {"main": 2, "image2": 1, "video": 0}
     plugin.daily_quota = 2
     plugin.cost_main_usd = 0.02
     plugin.cost_image2_usd = 0.08
+    plugin.cost_video_usd = 0.0
     plugin.cooldown_seconds = 0
+    plugin.video_cooldown_seconds = 0
+    plugin.video_max_concurrent = 2
+    plugin.video_max_concurrent_per_user = 1
     plugin._user_last_call = {}
 
     async def run():
@@ -557,6 +740,11 @@ def test_parse_quota_command_arg_channels():
     assert plugin._channel_for_command("kkt") == "main"
     assert plugin._channel_for_command("hajimi") == "main"
     assert plugin._channel_for_command("image2") == "image2"
+    assert plugin._channel_for_command("grokv") == "video"
+    assert plugin._parse_channel_token("video") == "video"
+    assert plugin._parse_channel_token("grokv") == "video"
+    assert plugin._parse_quota_command_arg("grokv 5") == ("video", 5, True)
+    assert plugin._parse_quota_command_arg("video 5") == ("video", 5, True)
 
 
 def test_image_label_roles():
@@ -692,27 +880,72 @@ def test_compose_user_instruction_chinese_style():
     assert text2.startswith("用户指令") or "画一只猫" in text2
 
 
+def test_compose_video_prompt_static_prefix():
+    plugin = object.__new__(Plugin)
+    plugin.video_prompt_enhance = True
+    plugin.video_style_prompt = ""
+    plugin.prefer_chinese_text = True
+    plugin.prefer_cn_locale = True
+    plugin.video_duration = 8
+
+    text = plugin._compose_video_prompt("猫跳一下", has_ref_image=False, duration=5)
+    assert "视频生成约束" in text
+    assert "约 5 秒" in text
+    assert "猫跳一下" in text
+    assert "用户指令" in text
+    assert "东亚" in text
+    assert "简体中文" in text
+
+    with_ref = plugin._compose_video_prompt(
+        "挥手", has_ref_image=True, duration=8
+    )
+    assert "参考图为首帧" in with_ref
+    assert "东亚" not in with_ref
+    assert "挥手" in with_ref
+
+    empty_ref = plugin._compose_video_prompt("", has_ref_image=True, duration=8)
+    assert "主体自然轻微动起来" in empty_ref
+    assert "静物或风景" in empty_ref
+    assert "不要擅自添加新角色" in empty_ref
+
+    plugin.video_prompt_enhance = False
+    raw = plugin._compose_video_prompt("原文直传", has_ref_image=False, duration=8)
+    assert raw == "原文直传"
+    assert "视频生成约束" not in raw
+
+    plugin.video_style_prompt = "【自定义】禁止运镜"
+    plugin.video_prompt_enhance = True
+    custom = plugin._compose_video_prompt("测试", has_ref_image=False, duration=3)
+    assert "【自定义】禁止运镜" in custom
+
+
 def test_format_quota_status_unlimited_and_limited(tmp_path):
     plugin = object.__new__(Plugin)
     plugin.cooldown_seconds = 0
+    plugin.video_cooldown_seconds = 0
+    plugin.video_max_concurrent = 2
+    plugin.video_max_concurrent_per_user = 1
     plugin.usage_path = tmp_path / "usage.json"
     plugin.quota_path = tmp_path / "daily_quota.json"
-    plugin.channel_limits = {"main": 0, "image2": 0}
+    plugin.channel_limits = {"main": 0, "image2": 0, "video": 0}
     plugin.daily_quota = 0
     plugin.cost_main_usd = 0.0
     plugin.cost_image2_usd = 0.0
+    plugin.cost_video_usd = 0.0
     plugin._user_last_call = {}
     text = plugin._format_quota_status(None)
     assert "不限制" in text
-    assert "冷却：关闭" in text
+    assert "出图冷却：关闭" in text
     assert "公用限额" not in text
     assert "上游账单" not in text
 
-    plugin.channel_limits = {"main": 50, "image2": 10}
+    plugin.channel_limits = {"main": 50, "image2": 10, "video": 5}
     plugin.daily_quota = 50
     plugin.cooldown_seconds = 15
+    plugin.video_cooldown_seconds = 60
     plugin.cost_main_usd = 0.01
     plugin.cost_image2_usd = 0.05
+    plugin.cost_video_usd = 0.2
 
     def fake_usage():
         return {
@@ -720,6 +953,7 @@ def test_format_quota_status_unlimited_and_limited(tmp_path):
             "channels": {
                 "main": {"daily": 7, "total": 100},
                 "image2": {"daily": 1, "total": 5},
+                "video": {"daily": 0, "total": 0},
             },
         }
 
@@ -728,8 +962,10 @@ def test_format_quota_status_unlimited_and_limited(tmp_path):
     assert "7/50" in text2
     assert "剩余 43" in text2
     assert "累计 100" in text2
-    assert "冷却：15s" in text2
+    assert "出图冷却：15s" in text2
+    assert "视频冷却：60s" in text2
     assert "/hajimi" in text2
+    assert "/grokv" in text2
     assert "单价" in text2
     assert "约" not in text2
     assert "预估" not in text2
@@ -764,3 +1000,133 @@ def test_build_content_includes_style_prompt():
     assert any(
         c.get("type") == "text" and "简体中文" in c.get("text", "") for c in content
     )
+
+
+def test_build_gif_prompt_contains_fixed_alignment_contract():
+    plugin = object.__new__(Plugin)
+    prompt = plugin._build_gif_prompt("让主角挥手")
+    assert "4 列 4 行" in prompt
+    assert "16 个等大画格" in prompt
+    assert "不得跨越画格边界" in prompt
+    assert "让主角挥手" in prompt
+    assert "固定机位" in prompt
+    assert "相邻画格之间只发生小幅" in prompt
+
+
+def test_build_gif_prompt_without_action_lets_model_choose():
+    plugin = object.__new__(Plugin)
+    prompt = plugin._build_gif_prompt("")
+    assert "用户没有指定具体动作" in prompt
+    assert "自行选择一个适合参考主体" in prompt
+    assert "做一个自然、可循环的简单动作" not in prompt
+
+
+def test_gif_command_grid_and_api_mapping():
+    assert Plugin._is_gif_command("hajimigif") is True
+    assert Plugin._is_gif_command("image2gif2") is True
+    assert Plugin._gif_grid_size("hajimigif") == 4
+    assert Plugin._gif_grid_size("hajimigif2") == 3
+    assert Plugin._gif_grid_size("image2gif2") == 3
+    assert Plugin._gif_api_command("hajimigif2") == "hajimi"
+    assert Plugin._gif_api_command("image2gif") == "image2"
+
+
+def test_build_gif_prompt_supports_dynamic_grid_and_multiple_subjects():
+    plugin = object.__new__(Plugin)
+    prompt = plugin._build_gif_prompt("让两个人自然跳舞", grid_size=3)
+    assert "3 列 3 行" in prompt
+    assert "9 个等大画格" in prompt
+    assert "多个主体" in prompt
+    assert "共同自然发展和互动" in prompt
+
+
+def test_make_gif_from_grid_crops_16_frames(tmp_path):
+    from PIL import Image
+
+    plugin = object.__new__(Plugin)
+    plugin.temp_dir = tmp_path
+    plugin.gif_frame_size = 64
+    plugin.gif_fps = 8
+    plugin.gif_max_bytes = 1024 * 1024
+    source = tmp_path / "grid.png"
+    image = Image.new("RGB", (1024, 1024), "white")
+    for index in range(16):
+        row, column = divmod(index, 4)
+        color = (index * 13 % 255, index * 29 % 255, index * 47 % 255)
+        cell = Image.new("RGB", (256, 256), color)
+        image.paste(cell, (column * 256, row * 256))
+    image.save(source)
+
+    output, count, cell_size = plugin._make_gif_from_grid(str(source))
+    assert count == 16
+    assert cell_size == 256
+    with Image.open(output) as gif:
+        assert gif.size == (64, 64)
+        assert gif.n_frames == 16
+
+
+def test_make_gif_from_grid_crops_9_frames(tmp_path):
+    from PIL import Image
+
+    plugin = object.__new__(Plugin)
+    plugin.temp_dir = tmp_path
+    plugin.gif_frame_size = 64
+    plugin.gif_fps = 8
+    plugin.gif_max_bytes = 1024 * 1024
+    source = tmp_path / "grid3.png"
+    image = Image.new("RGB", (900, 900), "white")
+    for index in range(9):
+        row, column = divmod(index, 3)
+        image.paste(
+            Image.new("RGB", (300, 300), (index * 13 % 255, index * 29 % 255, index * 47 % 255)),
+            (column * 300, row * 300),
+        )
+    image.save(source)
+
+    output, count, cell_size = plugin._make_gif_from_grid(str(source), grid_size=3)
+    assert count == 9
+    assert cell_size == 300
+    with Image.open(output) as gif:
+        assert gif.size == (64, 64)
+        assert gif.n_frames == 9
+
+
+def test_make_gif_from_grid_rejects_low_resolution(tmp_path):
+    from PIL import Image
+
+    plugin = object.__new__(Plugin)
+    plugin.temp_dir = tmp_path
+    plugin.gif_frame_size = 256
+    plugin.gif_fps = 8
+    plugin.gif_max_bytes = 1024 * 1024
+    source = tmp_path / "small.png"
+    Image.new("RGB", (400, 400), "white").save(source)
+    try:
+        plugin._make_gif_from_grid(str(source))
+    except RuntimeError as exc:
+        assert "分辨率过低" in str(exc)
+    else:
+        raise AssertionError("low-resolution storyboard should be rejected")
+
+
+def test_kkgifzip_level_parser_and_presets():
+    plugin = object.__new__(Plugin)
+    assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip")) == 1
+    assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip1")) == 1
+    assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip3 帮助")) == 3
+    assert plugin._parse_kkgifzip_level(FakeEvent([], "/kkgifzip5")) == 5
+    assert set(Plugin._KKGIFZIP_PRESETS) == {1, 2, 3, 4, 5}
+    assert Plugin._KKGIFZIP_PRESETS[1]["dimension"] > Plugin._KKGIFZIP_PRESETS[5]["dimension"]
+    help_text = Plugin._kkgifzip_help_text(plugin)
+    assert "/kkgifzip1-5" in help_text and "静态" in help_text
+
+
+def test_kkgifzip_command_names_in_parser_and_catalog():
+    plugin = object.__new__(Plugin)
+    plugin._command_aliases = Plugin._load_command_aliases({})
+    plugin._command_alias_map = Plugin._build_command_alias_map(plugin)
+    names = plugin._command_names_for_parser()
+    assert "kkgifzip" in names and "kkgifzip5" in names
+    catalog = plugin._command_catalog()
+    keys = {item["key"] for item in catalog}
+    assert "kkgifzip" in keys
