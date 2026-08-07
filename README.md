@@ -88,7 +88,16 @@ astrbot_plugin_kkt/
 api_base = https://your-openai-compatible-host/v1
 api_key = your-main-key
 model = your-image-model
+main_route = gemini        # gemini | grok | image2
 ```
+
+`main_route`（默认 `gemini`）控制 `/hajimi` 族实际调用的后端：
+
+- `gemini`：主通道 chat 接口（默认，即原行为）。
+- `grok`：/hajimi 静默路由到 Grok 生图通道（grok-imagine-image-quality）。
+- `image2`：/hajimi 静默路由到 Image2 通道（images 接口，只支持 1 张参考图）。
+
+路由对普通用户**无感知**：进度提示、出图样式、计费通道（仍记 `main`）均不变；实际后端只体现在管理侧任务日志与插件日志中。路由后端失败时自动回退主通道重试一次。管理员也可用 `/kkt路由` 指令静默切换（持久化到 `data/plugin_data/kkt/main_route.json`，优先级高于 WebUI 配置）。
 
 ### Grok 通道
 
@@ -378,6 +387,17 @@ animated_reference_frame = 首帧
 /kkt重置额度
 /kkt重置额度 video
 ```
+
+主通道路由（静默切换 `/hajimi` 实际后端，仅管理员；普通用户无感知，计费仍记 `main`）：
+
+```text
+/kkt路由              # 查询当前路由
+/kkt路由 grok         # /hajimi → Grok 生图通道
+/kkt路由 image2       # /hajimi → Image2 通道
+/kkt路由 gemini       # 切回主通道（默认）
+```
+
+路由后端失败会自动回退主通道重试一次；切换持久化到 `data/plugin_data/kkt/main_route.json`，WebUI 配置 `main_route` 为默认值。评估路由效果：任务日志与 AstrBot 日志中会记录真实模型名，建议在低峰时段切换并对比成功率与出图质量。
 
 视频并发由后台配置控制：
 

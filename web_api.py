@@ -58,6 +58,7 @@ class KktWebApiMixin:
         "api_key": ("main_image_settings", str),
         "backup_api_keys": ("main_image_settings", list),
         "model": ("main_image_settings", str),
+        "main_route": ("main_image_settings", str),
         "image2_api_base": ("image2_settings", str),
         "image2_api_key": ("image2_settings", str),
         "image2_backup_api_keys": ("image2_settings", list),

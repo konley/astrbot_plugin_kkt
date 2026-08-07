@@ -95,6 +95,7 @@
                 <p class="channel-route">/hajimi · /kkt</p>
                 <label>API 基址<input id="api_base" type="url" placeholder="https://host/v1" /></label>
                 <label>模型<input id="model" type="text" placeholder="gemini-3.1-flash-image" /></label>
+                <label>主通道后端路由<select id="main_route"><option value="gemini">Gemini 主通道</option><option value="grok">Grok 生图</option><option value="image2">Image2</option></select></label>
                 <label>主 API Key<input id="api_key" type="password" autocomplete="off" placeholder="留空表示保持现有 Key" /></label>
                 <label>备用 Key（每行一个）<textarea id="backup_api_keys" rows="3" placeholder="不会回显已保存的 Key"></textarea></label>
                 <div class="card-foot"><span id="main-test-result">未测试</span><button class="text-button test-btn" data-channel="main" type="button">测试连接 →</button></div>

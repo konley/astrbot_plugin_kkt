@@ -128,6 +128,13 @@
         "type": "string",
         "default": "gemini-3.1-flash-image",
         "hint": "/hajimi 与 /kkt 使用的模型名。"
+      },
+      "main_route": {
+        "description": "主通道后端路由",
+        "type": "string",
+        "default": "gemini",
+        "options": ["gemini", "grok", "image2"],
+        "hint": "/hajimi 族实际调用的后端：gemini=主通道 chat（默认）；grok=Grok 生图通道；image2=Image2 通道。管理员可用 /kkt路由 静默切换并持久化（不改此项）；普通用户无感知。"
       }
     }
   },

@@ -155,6 +155,12 @@ _DEFAULT_ADMIN_COMMAND_NAMES = {
         "hajimisensitive",
         "image2sensitive",
     ],
+    "route": [
+        "kkt路由",
+        "hajimi路由",
+        "kktroute",
+        "hajimiroute",
+    ],
     "help": ["kkt帮助", *_DEFAULT_HELP_ALIASES],
 }
 
@@ -788,6 +794,13 @@ class KktImagePlugin(Star, KktWebApiMixin):
         mode = str(config.get("image2_api_mode", "images") or "images").strip().lower()
         self.image2_api_mode = mode if mode in {"images", "chat", "auto"} else "images"
         self.image2_size = str(config.get("image2_size", "1024x1024") or "1024x1024").strip()
+        # /hajimi 族静默路由：gemini=主通道 chat（默认）；grok=/grok 通道；image2=/image2 通道。
+        # 管理员可用 /kkt路由 切换并持久化（不改 WebUI 配置）；对外表现与主通道一致。
+        route = str(config.get("main_route", "gemini") or "gemini").strip().lower()
+        self._main_route_config_default = (
+            route if route in {"gemini", "grok", "image2"} else "gemini"
+        )
+        self.main_route = self._main_route_config_default
         # /grokvideo：默认复用 Grok 生图通道；填写视频字段即可单独覆盖。
         configured_video_base = normalize_api_base(
             str(config.get("video_api_base", "") or "").strip()
@@ -946,6 +959,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
         self.task_log_path = self.temp_dir / "task_log.json"
         self._task_logs = self._load_task_logs()
         self.channel_limit_override_path = self.temp_dir / "channel_quota_limit.json"
+        # 主通道路由运行时覆盖：优先于 WebUI 配置默认值（静默切换持久化）
+        self.main_route_override_path = self.temp_dir / "main_route.json"
+        self.main_route = self._load_main_route_override()
         # 本地 Sensitive-lexicon 前置审核（默认关；词库不随插件分发）
         # WebUI 为默认值；管理员指令可 runtime 覆盖并持久化
         self._sensitive_filter_config_default = bool(
@@ -1022,7 +1038,8 @@ class KktImagePlugin(Star, KktWebApiMixin):
             "enable_at_avatar=%s label_images=%s "
             "prefer_chinese_text=%s prefer_cn_locale=%s style_prompt_len=%d "
             "video_prompt_enhance=%s video_style_prompt_len=%d "
-            "sensitive_filter=%s sensitive_words=%d sensitive_cats=%s lexicon=%s",
+            "sensitive_filter=%s sensitive_words=%d sensitive_cats=%s lexicon=%s "
+            "main_route=%s",
             len(self.group_blacklist),
             self.model,
             self._GROK_IMAGE_MODEL,
@@ -1069,6 +1086,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             self._sensitive_word_count,
             sorted(self._sensitive_words_by_cat.keys()) or "(none)",
             str(self.sensitive_lexicon_path),
+            self.main_route,
         )
         self._cleanup_stale_files()
         self._register_webui_apis()
@@ -1618,6 +1636,94 @@ class KktImagePlugin(Star, KktWebApiMixin):
     def _format_sensitive_status(self) -> str:
         """群聊可见：仅一行开/关，不暴露词条与类别。"""
         return f"本地审核：{'开' if self.sensitive_filter_enabled else '关'}"
+
+    # 主通道路由：/hajimi 族实际后端（静默，用户无感知）
+    _MAIN_ROUTE_LABELS: ClassVar[dict[str, str]] = {
+        "gemini": "主通道（Gemini）",
+        "grok": "Grok 生图",
+        "image2": "Image2",
+    }
+
+    def _load_main_route_override(self) -> str:
+        """读取运行时主通道路由覆盖；无覆盖回退 WebUI 配置默认。"""
+        try:
+            path = self.main_route_override_path
+            if path and path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                route = str(data.get("route") or "").strip().lower()
+                if route in {"gemini", "grok", "image2"}:
+                    return route
+        except Exception as exc:
+            logger.warning("[kkt] 读取主通道路由覆盖失败，回退配置默认: %s", exc)
+        return self._main_route_config_default
+
+    def _save_main_route_override(self, route: str) -> None:
+        """持久化运行时主通道路由（不改 WebUI 配置文件）。"""
+        route = route if route in {"gemini", "grok", "image2"} else "gemini"
+        payload = {
+            "route": route,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "command",
+        }
+        self.main_route_override_path.parent.mkdir(parents=True, exist_ok=True)
+        self.main_route_override_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.main_route = route
+        logger.info("[kkt] 主通道路由已更新: route=%s", route)
+
+    def _format_main_route_status(self) -> str:
+        """管理侧路由状态；不发送给普通用户。"""
+        label = self._MAIN_ROUTE_LABELS.get(self.main_route, self.main_route)
+        if self.main_route == self._main_route_config_default:
+            return f"主通道路由（/hajimi 实际后端）：{label}（配置默认）"
+        return f"主通道路由（/hajimi 实际后端）：{label}（运行时覆盖）"
+
+    @staticmethod
+    def _parse_main_route_arg(text: str) -> str | None:
+        """解析路由参数 → gemini|grok|image2；无法识别返回 None。"""
+        raw = re.sub(
+            r"(?i)^\s*(?:路由|route)\s*", "", (text or "").strip()
+        )
+        normalized = re.sub(r"\s+", "", raw).casefold()
+        if normalized in {
+            "gemini",
+            "gemini3",
+            "g3",
+            "main",
+            "hajimi",
+            "kkt",
+            "默认",
+            "主通道",
+            "chat",
+        }:
+            return "gemini"
+        if normalized in {"grok", "g", "gk", "grokimage"}:
+            return "grok"
+        if normalized in {"image2", "img2", "i2", "grokimage2", "图2"}:
+            return "image2"
+        return None
+
+    def _route_main_api_command(self, api_command: str) -> str:
+        """主通道族指令按路由映射到实际 API 通道；非主通道族原样返回。"""
+        if (
+            str(api_command or "").strip().lower() == "hajimi"
+            and self.main_route != "gemini"
+        ):
+            return self.main_route
+        return api_command
+
+    @staticmethod
+    def _is_main_family_command(command: str) -> bool:
+        """判断原始指令是否属于 /hajimi 主通道族（含 GIF 分镜）。"""
+        return str(command or "").strip().lower() in {
+            "hajimi",
+            "kkt",
+            "hajimigif",
+            "hajimigif2",
+            "kktgif",
+        }
 
     @staticmethod
     def _parse_sensitive_toggle_arg(text: str) -> bool | None:
@@ -3181,6 +3287,61 @@ class KktImagePlugin(Star, KktWebApiMixin):
         )
         yield event.plain_result(self._format_sensitive_status())
 
+    @filter.command(
+        "kkt路由",
+        alias=set(_DEFAULT_ADMIN_COMMAND_NAMES["route"][1:]),
+    )
+    async def handle_main_route(
+        self, event: AstrMessageEvent, arg: GreedyStr = ""
+    ):
+        """查看或切换 /hajimi 实际后端（仅管理员，静默生效）。
+
+        - /kkt路由 -> 查询当前路由
+        - /kkt路由 gemini|grok|image2 -> 切换后端；普通用户无感知
+        """
+        group_id = str(event.get_group_id() or "").strip()
+        if group_id and group_id in self.group_blacklist:
+            return
+        event.stop_event()
+
+        raw_arg = str(arg or "").strip()
+        if not raw_arg:
+            msg = (event.get_message_str() or "").strip()
+            raw_arg = re.sub(
+                r"(?i)^/?(?:kkt|hajimi|image2)(?:路由|route)\s*",
+                "",
+                msg,
+            ).strip()
+
+        if not self._is_admin(event):
+            yield event.plain_result("仅管理员可查看或切换主通道路由。")
+            return
+
+        if not raw_arg:
+            yield event.plain_result(self._format_main_route_status())
+            return
+
+        route = self._parse_main_route_arg(raw_arg)
+        if route is None:
+            yield event.plain_result(
+                "参数无效。查询：/kkt路由；切换：/kkt路由 gemini|grok|image2"
+            )
+            return
+
+        old_route = self.main_route
+        self._save_main_route_override(route)
+        logger.info(
+            "[kkt] 管理员切换主通道路由(指令): operator=%s old=%s new=%s",
+            event.get_sender_id(),
+            old_route,
+            route,
+        )
+        yield event.plain_result(
+            f"已切换：{self._MAIN_ROUTE_LABELS.get(old_route, old_route)} → "
+            f"{self._MAIN_ROUTE_LABELS.get(route, route)}"
+            "（静默生效，普通用户无感知；失败自动回退主通道）"
+        )
+
     def _detect_command_name(self, event: AstrMessageEvent) -> str:
         """从消息中识别 canonical command，别名和视频紧凑时长均支持。"""
 
@@ -4097,6 +4258,43 @@ class KktImagePlugin(Star, KktWebApiMixin):
             yield event.plain_result(self._format_sensitive_status())
             return
 
+        # 兼容：/kkt 路由、/kkt 路由 grok（静默切换后端，仅管理员）
+        if normalized in {"路由", "route"}:
+            if not self._is_admin(event):
+                yield event.plain_result("仅管理员可查看主通道路由。")
+                return
+            yield event.plain_result(self._format_main_route_status())
+            return
+        route_match = re.fullmatch(
+            r"(?:路由|route)\s*(.+)",
+            prompt_stripped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if route_match:
+            if not self._is_admin(event):
+                yield event.plain_result("仅管理员可切换主通道路由。")
+                return
+            route = self._parse_main_route_arg(route_match.group(1))
+            if route is None:
+                yield event.plain_result(
+                    "参数无效。查询：/kkt路由；切换：/kkt路由 gemini|grok|image2"
+                )
+                return
+            old_route = self.main_route
+            self._save_main_route_override(route)
+            logger.info(
+                "[kkt] 管理员切换主通道路由(主指令参数): operator=%s old=%s new=%s",
+                event.get_sender_id(),
+                old_route,
+                route,
+            )
+            yield event.plain_result(
+                f"已切换：{self._MAIN_ROUTE_LABELS.get(old_route, old_route)} → "
+                f"{self._MAIN_ROUTE_LABELS.get(route, route)}"
+                "（静默生效，普通用户无感知；失败自动回退主通道）"
+            )
+            return
+
         # 先收集引用图文，再判断 help。
         # 否则裸 /kkt + 引用文案 会在读引用之前就被当成空 prompt 返回帮助。
         try:
@@ -4141,6 +4339,12 @@ class KktImagePlugin(Star, KktWebApiMixin):
             return
 
         api_command = self._gif_api_command(command) if is_gif else command
+        # 静默路由：/hajimi 族被切到 grok/image2 时，实际后端随之切换；
+        # 计费仍记主通道、对外回复不变，用户无感知。
+        routed_main = (
+            self._is_main_family_command(command) and self.main_route != "gemini"
+        )
+        api_command = self._route_main_api_command(api_command)
         gif_grid_size = self._gif_grid_size(command) if is_gif else 0
         creds = self._resolve_api_credentials(api_command)
         if isinstance(creds, str):
@@ -4155,7 +4359,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
             and len(image_items) > 1
             and self._should_use_images_api(api_command, model)
         ):
-            reject_msg = self._format_image2_multi_ref_reject(image_items)
+            reject_msg = self._format_image2_multi_ref_reject(
+                image_items, via_main_route=routed_main
+            )
             logger.info(
                 "[kkt] image2 多参考图拦截(不请求): count=%d labels=%s",
                 len(image_items),
@@ -4171,7 +4377,10 @@ class KktImagePlugin(Star, KktWebApiMixin):
             return
 
         # 分通道日限额：仅检查，成功出图后再记账（失败不扣）
+        # 路由到其它后端时仍记主通道：计费/额度口径与用户可见面保持一致（静默）
         billing_channel = self._channel_for_command(api_command)
+        if routed_main:
+            billing_channel = self._CHANNEL_MAIN
         quota_msg = await self._check_channel_quota(event, billing_channel)
         if quota_msg:
             yield event.plain_result(quota_msg)
@@ -4196,17 +4405,20 @@ class KktImagePlugin(Star, KktWebApiMixin):
             model=model,
         )
 
+        result: str | None = None
+        last_error: Exception | None = None
         try:
             logger.info(
                 "[kkt] 开始调用图像 API: command=%s channel=%s model=%s key_count=%d "
-                "image_count=%d label_images=%s image2_mode=%s",
+                "image_count=%d label_images=%s image2_mode=%s main_route=%s",
                 command,
                 billing_channel,
                 model,
                 len(api_keys),
                 len(image_items),
                 self.label_images,
-                self.image2_api_mode if command == "image2" else "n/a",
+                self.image2_api_mode if api_command == "image2" else "n/a",
+                self.main_route,
             )
             result = await self._request_image(
                 self._build_gif_prompt(prompt, gif_grid_size) if is_gif else prompt,
@@ -4217,13 +4429,61 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 model=model,
                 command=api_command,
             )
-            if not result:
-                logger.error("[kkt] API 调用完成但未解析出图片")
-                self._finish_task_log(
-                    task_id, status="failed", code="empty_response", progress=0
+        except Exception as exc:
+            last_error = exc
+            if routed_main:
+                # 路由后端失败时静默回退主通道重试一次，用户无感知
+                logger.warning(
+                    "[kkt] 路由通道失败，尝试主通道回退: route=%s error=%s",
+                    api_command,
+                    type(exc).__name__,
                 )
-                yield event.plain_result("API 返回中没有找到图片，请检查模型和接口响应格式。")
-                return
+                try:
+                    fb_creds = self._resolve_api_credentials("hajimi")
+                    if isinstance(fb_creds, str):
+                        raise RuntimeError(fb_creds)
+                    fb_base, fb_keys, fb_model = fb_creds
+                    result = await self._request_image(
+                        self._build_gif_prompt(prompt, gif_grid_size)
+                        if is_gif
+                        else prompt,
+                        image_items,
+                        event,
+                        api_base=fb_base,
+                        api_keys=fb_keys,
+                        model=fb_model,
+                        command="hajimi",
+                    )
+                    last_error = None
+                    logger.warning(
+                        "[kkt] 主通道回退成功: original_route=%s model=%s",
+                        api_command,
+                        fb_model,
+                    )
+                except Exception as exc2:
+                    last_error = exc2
+                    logger.exception("[kkt] 主通道回退失败: %s", exc2)
+            else:
+                logger.exception("[kkt] 图片生成失败: %s", exc)
+
+        if last_error is not None:
+            self._finish_task_log(
+                task_id,
+                status="failed",
+                code=type(last_error).__name__,
+                progress=0,
+            )
+            yield event.plain_result(self._safe_image_failure(last_error))
+            return
+        if not result:
+            logger.error("[kkt] API 调用完成但未解析出图片")
+            self._finish_task_log(
+                task_id, status="failed", code="empty_response", progress=0
+            )
+            yield event.plain_result("API 返回中没有找到图片，请检查模型和接口响应格式。")
+            return
+
+        try:
             image_path = await self._materialize_image(result)
             if not image_path:
                 self._finish_task_log(
@@ -4268,7 +4528,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
             if output_path != image_path:
                 self._schedule_cleanup(image_path)
         except Exception as exc:
-            logger.exception("[kkt] 图片生成失败: %s", exc)
+            logger.exception("[kkt] 图片处理失败: %s", exc)
             self._finish_task_log(
                 task_id, status="failed", code=type(exc).__name__, progress=0
             )
@@ -5647,13 +5907,25 @@ class KktImagePlugin(Star, KktWebApiMixin):
         )
 
     @staticmethod
-    def _format_image2_multi_ref_reject(image_items: list[dict]) -> str:
-        """images 模式多参考图拦截文案：不请求 API、不扣额度。"""
+    def _format_image2_multi_ref_reject(
+        image_items: list[dict], *, via_main_route: bool = False
+    ) -> str:
+        """images 模式多参考图拦截文案：不请求 API、不扣额度。
+
+        via_main_route=True：/hajimi 被静默路由到 Image2 时，文案不暴露路由。
+        """
         total = len(image_items or [])
-        lines = [
-            f"/image2 当前为 Images edit模式，只支持 1 张参考图+文字说明（已收到 {total} 张）。"
-            "请只保留一张再试；多图合图请用哈基米 /hajimi。"
-        ]
+        if via_main_route:
+            head = (
+                f"当前通道只支持 1 张参考图+文字说明（已收到 {total} 张）。"
+                "请只保留一张再试。"
+            )
+        else:
+            head = (
+                f"/image2 当前为 Images edit模式，只支持 1 张参考图+文字说明（已收到 {total} 张）。"
+                "请只保留一张再试；多图合图请用哈基米 /hajimi。"
+            )
+        lines = [head]
         labels = [
             str(item.get("label") or "").strip()
             for item in (image_items or [])

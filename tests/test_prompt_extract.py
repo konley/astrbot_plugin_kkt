@@ -634,6 +634,66 @@ def test_format_sensitive_status_is_one_line_only():
     assert plugin._format_sensitive_status() == "本地审核：开"
 
 
+def test_parse_main_route_arg():
+    assert Plugin._parse_main_route_arg("") is None
+    assert Plugin._parse_main_route_arg("gemini") == "gemini"
+    assert Plugin._parse_main_route_arg("主通道") == "gemini"
+    assert Plugin._parse_main_route_arg("Grok") == "grok"
+    assert Plugin._parse_main_route_arg("路由 grok") == "grok"
+    assert Plugin._parse_main_route_arg("image2") == "image2"
+    assert Plugin._parse_main_route_arg("grokimage2") == "image2"
+    assert Plugin._parse_main_route_arg("图2") == "image2"
+    assert Plugin._parse_main_route_arg("乱写") is None
+
+
+def test_route_main_api_command():
+    plugin = object.__new__(Plugin)
+    plugin.main_route = "gemini"
+    assert plugin._route_main_api_command("hajimi") == "hajimi"
+    plugin.main_route = "grok"
+    assert plugin._route_main_api_command("hajimi") == "grok"
+    assert plugin._route_main_api_command("image2") == "image2"
+    plugin.main_route = "image2"
+    assert plugin._route_main_api_command("hajimi") == "image2"
+    assert plugin._route_main_api_command("grok") == "grok"
+
+
+def test_is_main_family_command():
+    assert Plugin._is_main_family_command("hajimi") is True
+    assert Plugin._is_main_family_command("kkt") is True
+    assert Plugin._is_main_family_command("hajimigif") is True
+    assert Plugin._is_main_family_command("image2") is False
+    assert Plugin._is_main_family_command("grok") is False
+
+
+def test_format_image2_multi_ref_reject_via_route_is_neutral():
+    msg = Plugin._format_image2_multi_ref_reject(
+        [{"label": "图1 · 引用原图/底图"}], via_main_route=True
+    )
+    assert "已收到 1 张" in msg
+    assert "image2" not in msg.lower()
+    assert "hajimi" not in msg.lower()
+    assert "哈基米" not in msg
+
+
+def test_main_route_override_roundtrip(tmp_path):
+    plugin = object.__new__(Plugin)
+    plugin.main_route_override_path = tmp_path / "main_route.json"
+    plugin._main_route_config_default = "gemini"
+    plugin.main_route = plugin._load_main_route_override()
+    assert plugin.main_route == "gemini"
+    plugin._save_main_route_override("grok")
+    plugin.main_route = plugin._load_main_route_override()
+    assert plugin.main_route == "grok"
+    plugin._save_main_route_override("invalid")
+    assert plugin.main_route == "gemini"
+    payload = json.loads(
+        (tmp_path / "main_route.json").read_text(encoding="utf-8")
+    )
+    assert payload["route"] == "gemini"
+    assert payload["source"] == "command"
+
+
 class _UserEvent(FakeEvent):
     def __init__(self, sender_id="10001", admin=False):
         super().__init__([], "")
