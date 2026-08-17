@@ -356,6 +356,12 @@
         "options": ["首帧", "中间帧", "末帧"],
         "hint": "参考 GIF/WebP 动图时抽取哪一帧作为图片或视频参考。"
       },
+      "flatten_reference_alpha": {
+        "description": "参考图透明层转白底",
+        "type": "bool",
+        "default": true,
+        "hint": "参考图带透明通道时先合成为白底再提交，避免上游不支持透明而返回黑底；关闭则原样直传。"
+      },
       "label_images": {
         "description": "多图顺序标签",
         "type": "bool",

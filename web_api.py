@@ -85,6 +85,7 @@ class KktWebApiMixin:
         "video_style_prompt": ("video_settings", str),
         # Prompt and message behavior
         "animated_reference_frame": ("input_behavior_settings", str),
+        "flatten_reference_alpha": ("input_behavior_settings", bool),
         "enable_reply_image": ("input_behavior_settings", bool),
         "enable_at_avatar": ("input_behavior_settings", bool),
         "label_images": ("input_behavior_settings", bool),

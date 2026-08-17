@@ -847,6 +847,8 @@ class KktImagePlugin(Star, KktWebApiMixin):
         self.animated_reference_frame = (
             frame_mode if frame_mode in {"首帧", "中间帧", "末帧"} else "首帧"
         )
+        # 参考图带透明通道时先合成白底再提交，规避上游不支持透明而渲染黑底
+        self.flatten_reference_alpha = bool(config.get("flatten_reference_alpha", True))
         # /grok 生图优先使用自身配置，留空时复用已配置的视频 Grok 通道，最后才回退主图像通道。
         grok_base = str(config.get("grok_api_base", "") or "").strip()
         self.grok_api_base = (
@@ -5625,6 +5627,19 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     except Exception:
                         pass
 
+    @staticmethod
+    def _flatten_alpha_to_white(image: Image.Image) -> Image.Image | None:
+        """参考图透明层合成到白底；无真实透明区域时返回 None（保持原图）。
+
+        上游不支持带透明通道的图片，直接提交 RGBA 会被以黑色合成成黑底。
+        """
+        rgba = image.convert("RGBA")
+        alpha = rgba.getchannel("A")
+        if alpha.getextrema()[0] == 255:
+            return None
+        background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        return Image.alpha_composite(background, rgba)
+
     async def _collect_images(
         self, event: AstrMessageEvent
     ) -> tuple[list[dict], str]:
@@ -5656,6 +5671,28 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 logger.warning(f"[kkt] 图片转 Base64 失败: {exc}")
                 return
             data_url = f"data:image/jpeg;base64,{encoded}"
+            if self.flatten_reference_alpha:
+                try:
+                    raw_bytes = base64.b64decode(encoded)
+                    with Image.open(io.BytesIO(raw_bytes)) as opened:
+                        if int(getattr(opened, "n_frames", 1) or 1) == 1:
+                            flattened = self._flatten_alpha_to_white(opened)
+                        else:
+                            flattened = None
+                    if flattened is not None:
+                        buffer = io.BytesIO()
+                        flattened.save(buffer, format="PNG")
+                        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+                        data_url = f"data:image/png;base64,{encoded}"
+                        logger.info(
+                            "[kkt] 参考图透明层已合成白底: source=%s mode=%s",
+                            source,
+                            opened.mode,
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "[kkt] 参考图透明层压白底失败，保留原始数据: %s", exc
+                    )
             animated_frame = ""
             try:
                 raw_bytes = base64.b64decode(encoded)
@@ -5670,6 +5707,15 @@ class KktImagePlugin(Star, KktWebApiMixin):
                             frame_index = 0
                         opened.seek(frame_index)
                         frame = opened.convert("RGBA")
+                        flattened_frame = self._flatten_alpha_to_white(frame)
+                        if flattened_frame is not None:
+                            frame = flattened_frame
+                            logger.info(
+                                "[kkt] 动图参考帧透明层已合成白底: source=%s frame=%d/%d",
+                                source,
+                                frame_index + 1,
+                                frame_count,
+                            )
                         buffer = io.BytesIO()
                         frame.save(buffer, format="PNG")
                         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
