@@ -381,7 +381,15 @@ def build_user_help_markdown(
             g("image2_gif2", ["image2gif2"]),
             "Image2 通道 9 帧分镜 GIF。",
         ),
-        "- **/kkgif**  \n  引用或附带 **一个视频** → 本地转 GIF（最长 16 秒）。",
+        (
+            "- **/kkgif**  \n"
+            "  引用或附带 **一个视频** → 本地转 GIF（整段最长 16 秒）。\n"
+            "  截取：`/kkgif[3,8.5]` 第 3–8.5 秒；"
+            "`/kkgif[,3.8]` 开头到 3.8 秒；"
+            "`/kkgif[3.8,]` 3.8 秒到结尾。\n"
+            "  括号可用 `[]` `()` `（）` `【】`，逗号可用 `,` 或 `，`。\n"
+            "  说明可发 `/kkgif帮助`，不必加空格。"
+        ),
         _help_md_item(
             g("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
             "压缩视频或 GIF。档位：`/gifz`～`/gifz5`（数字越大越狠）。不支持静态图。",
@@ -459,7 +467,10 @@ def build_user_help_plain(
         _help_cmd_line(g("main_gif2", ["hajimigif2"]), "9帧分镜GIF"),
         _help_cmd_line(g("image2_gif", ["image2gif"]), "Image2 16帧"),
         _help_cmd_line(g("image2_gif2", ["image2gif2"]), "Image2 9帧"),
-        "/kkgif  一个视频→GIF(最长16秒)",
+        "/kkgif  一个视频→GIF(整段最长16秒)",
+        "截取 /kkgif[3,8.5]；/kkgif[,3.8] 开头到3.8秒；/kkgif[3.8,] 到结尾",
+        "括号 [] () （） 【】，逗号 , 或 ，",
+        "说明 /kkgif帮助 不必加空格",
         _help_cmd_line(
             g("kkgifzip", ["kkgifzip", "gifz", "gifzip"]),
             "压缩视频/GIF；/gifz3=3档",
@@ -572,6 +583,9 @@ def build_gif_help_text(command_groups: dict[str, dict[str, object]] | None = No
         f"Image2 16/9 帧：{_format_command_names(names('image2_gif', ['image2gif']))} / "
         f"{_format_command_names(names('image2_gif2', ['image2gif2']))}\n"
         "视频转 GIF：引用或附带一个视频后使用 /kkgif\n"
+        "截取：/kkgif[3,8.5] 指定区间；/kkgif[,3.8] 开头到 3.8 秒；/kkgif[3.8,] 到结尾\n"
+        "括号可用 [] () （） 【】，逗号可用 , 或 ，。整段或片段最长 16 秒。\n"
+        "说明：/kkgif帮助 不必加空格。\n"
         "压缩：/kkgifzip|/gifz|/gifzip 或带档位 1-5（视频或 GIF；静态图不支持）\n"
         "每个分镜指令都支持提示词；无提示词时由模型选择简单循环动作。"
     )
@@ -591,16 +605,44 @@ def build_video_help_text(video_names: list[str] | None = None) -> str:
     )
 
 
+_KKGIF_CLIP_WAKE_RE = re.compile(
+    r"(?i)^/?kkgif(?:\s*[\[\(（【［]|(?:帮助|help|[?？])\s*$)"
+)
+_KKGIF_CLIP_TRANS = str.maketrans(
+    {
+        "０": "0",
+        "１": "1",
+        "２": "2",
+        "３": "3",
+        "４": "4",
+        "５": "5",
+        "６": "6",
+        "７": "7",
+        "８": "8",
+        "９": "9",
+        "．": ".",
+        "，": ",",
+        "（": "(",
+        "）": ")",
+        "【": "[",
+        "】": "]",
+        "［": "[",
+        "］": "]",
+    }
+)
+
+
+
 @register(
     "astrbot_plugin_kkt",
     "konley",
     "调用 NewAPI 生图/修图，并对接 grok2api 视频",
-    "0.20.0",
+    "0.20.3",
 )
 class KktImagePlugin(Star, KktWebApiMixin):
     """Generate or edit images through an OpenAI-compatible endpoint."""
 
-    _GROK_IMAGE_MODEL = "grok-imagine-image-quality"
+    _GROK_IMAGE_MODEL = "grok-imagine-image-lite"
 
     # 计费/限额通道：kkt+hajimi 共用 main；image2 / video 独立
     _CHANNEL_MAIN = "main"
@@ -759,6 +801,13 @@ class KktImagePlugin(Star, KktWebApiMixin):
         r"(?:图片|圖|图|image)\s*([0-9]+)",
         re.IGNORECASE,
     )
+    # 出图/出视频时附在成品上的状态文案。回引这些消息时不能再写进提示词。
+    _BOT_STATUS_LINE_RE = re.compile(
+        r"^(?:"
+        r"生成耗时[:：]\s*\d+\s*秒[，,]\s*请查收喵"
+        r"|视频生成成功[，,]\s*耗时[:：]\s*\d+\s*秒[，,]\s*请查收喵"
+        r")$"
+    )
 
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -849,6 +898,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
         )
         # 参考图带透明通道时先合成白底再提交，规避上游不支持透明而渲染黑底
         self.flatten_reference_alpha = bool(config.get("flatten_reference_alpha", True))
+        # /grok 生图模型可在面板配置，留空回退默认 lite。
+        configured_grok_model = str(config.get("grok_image_model", "") or "").strip()
+        self._GROK_IMAGE_MODEL = configured_grok_model or self._GROK_IMAGE_MODEL
         # /grok 生图优先使用自身配置，留空时复用已配置的视频 Grok 通道，最后才回退主图像通道。
         grok_base = str(config.get("grok_api_base", "") or "").strip()
         self.grok_api_base = (
@@ -1367,7 +1419,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 "primary": "kkgif",
                 "aliases": [],
                 "names": ["kkgif"],
-                "description": "把一个附带或引用的视频在本地转换为 GIF。",
+                "description": "本地把一个视频转成 GIF。/kkgif[3,8.5] 截取区间；[,3.8] 从开头；[3.8,] 到结尾。",
             }
         )
         return catalog
@@ -3076,6 +3128,58 @@ class KktImagePlugin(Star, KktWebApiMixin):
         return re.sub(r"\s+", " ", cleaned).strip()
 
     @classmethod
+    def _sanitize_quoted_prompt(cls, text: str) -> str:
+        """去掉机器人附在成品上的状态行，避免回引时污染提示词。"""
+        kept: list[str] = []
+        for line in (text or "").splitlines():
+            stripped = line.strip()
+            if not stripped or cls._BOT_STATUS_LINE_RE.match(stripped):
+                continue
+            kept.append(stripped)
+        return "\n".join(kept).strip()
+
+    @staticmethod
+    def _reply_sender_id(component) -> str:
+        sender = getattr(component, "sender_id", None)
+        if sender in (None, "", 0, "0"):
+            sender = getattr(component, "qq", None)
+        text = str(sender or "").strip()
+        return "" if text in {"", "0"} else text
+
+    @classmethod
+    def _quoted_texts_from_reply(cls, component, *, self_id: str = "") -> list[str]:
+        """从一条引用里取出可当提示词的文字。
+
+        引用机器人自己的出图/出视频回复时，只留图片，丢掉「生成耗时」等状态文案。
+        引用别人时仍保留对方原文，但同样剥掉误入的状态行。
+        """
+        sender = cls._reply_sender_id(component)
+        from_self = bool(self_id and sender == self_id)
+        texts: list[str] = []
+        dropped = False
+        for quoted in getattr(component, "chain", None) or []:
+            if not isinstance(quoted, Comp.Plain):
+                continue
+            raw = str(getattr(quoted, "text", "") or "").strip()
+            if not raw:
+                continue
+            if from_self:
+                dropped = True
+                continue
+            cleaned = cls._sanitize_quoted_prompt(raw)
+            if cleaned:
+                texts.append(cleaned)
+            else:
+                dropped = True
+        if dropped:
+            logger.info(
+                "[kkt] 已忽略引用文字噪声: from_self=%s sender=%s",
+                from_self,
+                sender or "-",
+            )
+        return texts
+
+    @classmethod
     def _is_help_token(cls, text: str) -> bool:
         return (text or "").strip().lower() in {"帮助", "help", "?"}
 
@@ -3439,6 +3543,189 @@ class KktImagePlugin(Star, KktWebApiMixin):
         model = self._GROK_IMAGE_MODEL if command == "grok" else self.model
         return self.api_base, keys, model
 
+
+    @staticmethod
+    def _kkgif_command_filter_matches(text: str) -> bool:
+        """Mirror CommandFilter: only exact kkgif, or kkgif plus a space."""
+        message = re.sub(r"\s+", " ", (text or "").strip())
+        if message.startswith("/"):
+            message = message[1:].lstrip()
+        return message == "kkgif" or message.startswith("kkgif ")
+
+    @staticmethod
+    def _kkgif_text_is_glued_help(text: str) -> bool:
+        message = (text or "").strip()
+        if message.startswith("/"):
+            message = message[1:].strip()
+        return bool(re.fullmatch(r"(?i)kkgif(?:帮助|help|[?？])", message))
+
+    def _kkgif_is_help(self, event: AstrMessageEvent, prompt: str) -> bool:
+        token = str(prompt or "").strip()
+        if self._is_help_token(token) or token.lower() in {"help", "帮助", "?", "？"}:
+            return True
+        texts = [event.get_message_str() or ""]
+        plain = "".join(
+            getattr(component, "text", "") or ""
+            for component in event.get_messages()
+            if isinstance(component, Comp.Plain)
+        ).strip()
+        if plain:
+            texts.append(plain)
+        return any(self._kkgif_text_is_glued_help(item) for item in texts)
+
+    @staticmethod
+    def _kkgif_clip_usage() -> str:
+        return (
+            "时间格式不对。示例：/kkgif[3,8.5] 只转第 3 到 8.5 秒；"
+            "/kkgif[,3.8] 从开头到 3.8 秒；/kkgif[3.8,] 从 3.8 秒到结尾。"
+            "括号可用 [] () （） 【】，逗号可用 , 或 ，。"
+        )
+
+    def _kkgif_help_text(self) -> str:
+        limit = int(getattr(self, "video_gif_max_duration", 16) or 16)
+        return (
+            "康康视频转 GIF\n"
+            "用法：引用或附带一个视频后发送 /kkgif\n"
+            "说明：/kkgif帮助 或 /kkgif 帮助，中间可以不加空格。\n"
+            "截取（单位：秒）：\n"
+            "/kkgif[3,8.5]  只转第 3 秒到 8.5 秒\n"
+            "/kkgif[,3.8]   从开头转到 3.8 秒\n"
+            "/kkgif[3.8,]   从 3.8 秒转到结尾\n"
+            "括号可用 [] () （） 【】，逗号可用 , 或 ，。\n"
+            f"限制：仅一个视频；整段或截取最长 {limit} 秒；输出不含声音。\n"
+            "压缩请用 /kkgifzip 或 /gifz（可带 1-5 档）。"
+        )
+
+    @staticmethod
+    def _format_kkgif_seconds(value: float) -> str:
+        return f"{value:.2f}".rstrip("0").rstrip(".") or "0"
+
+    def _kkgif_clip_span(self, clip: tuple[float | None, float | None]) -> str:
+        start, end = clip
+        if start is None and end is not None:
+            return f"开头到 {self._format_kkgif_seconds(end)} 秒"
+        if start is not None and end is None:
+            return f"{self._format_kkgif_seconds(start)} 秒到结尾"
+        if start is not None and end is not None:
+            return (
+                f"{self._format_kkgif_seconds(start)} 秒到 "
+                f"{self._format_kkgif_seconds(end)} 秒"
+            )
+        return ""
+
+    def _parse_kkgif_clip_text(
+        self, text: str
+    ) -> tuple[float | None, float | None] | None:
+        """Parse kkgif time range. None means no clip syntax."""
+        normalized = (text or "").strip().translate(_KKGIF_CLIP_TRANS)
+        if not normalized:
+            return None
+        prefixed = re.match(r"^/?kkgif(?P<rest>.*)$", normalized, re.IGNORECASE)
+        if prefixed:
+            rest = prefixed.group("rest")
+            if rest and not rest[0].isspace() and rest[0] not in "[(":
+                return None
+            body = rest.strip()
+        else:
+            body = normalized
+        if not body or body.lower() in {"帮助", "help", "?"}:
+            return None
+        if body[0] not in "[(":
+            return None
+        match = re.fullmatch(
+            r"(?P<open>[\[(])\s*(?P<start>\d+(?:\.\d+)?)?\s*,\s*"
+            r"(?P<end>\d+(?:\.\d+)?)?\s*(?P<close>[\])])",
+            body,
+        )
+        if not match:
+            raise ValueError(self._kkgif_clip_usage())
+        open_b = match.group("open")
+        close_b = match.group("close")
+        if (open_b == "[" and close_b != "]") or (open_b == "(" and close_b != ")"):
+            raise ValueError(self._kkgif_clip_usage())
+        start_token = match.group("start")
+        end_token = match.group("end")
+        if start_token is None and end_token is None:
+            raise ValueError(self._kkgif_clip_usage())
+        start = float(start_token) if start_token is not None else None
+        end = float(end_token) if end_token is not None else None
+        limit = float(getattr(self, "video_gif_max_duration", 16) or 16)
+        if start is not None and end is not None:
+            if end <= start:
+                raise ValueError("结束秒数要大于开始秒数，例如 /kkgif[3,8.5]。")
+            if end - start > limit + 0.05:
+                raise ValueError(f"截取片段不能超过 {int(limit)} 秒。")
+        elif start is None and end is not None:
+            if end <= 0:
+                raise ValueError("结束秒数要大于 0，例如 /kkgif[,3.8]。")
+            if end > limit + 0.05:
+                raise ValueError(f"从开头截取不能超过 {int(limit)} 秒。")
+        return start, end
+
+    def _kkgif_clip_from_event(
+        self, event: AstrMessageEvent, prompt: str
+    ) -> tuple[float | None, float | None] | None:
+        candidates: list[str] = []
+        raw = (event.get_message_str() or "").strip()
+        if raw:
+            candidates.append(raw)
+        plain = "".join(
+            getattr(component, "text", "") or ""
+            for component in event.get_messages()
+            if isinstance(component, Comp.Plain)
+        ).strip()
+        if plain and plain not in candidates:
+            candidates.append(plain)
+        extra = (prompt or "").strip()
+        if extra and extra not in candidates:
+            candidates.append(extra)
+        error: ValueError | None = None
+        for candidate in candidates:
+            try:
+                parsed = self._parse_kkgif_clip_text(candidate)
+            except ValueError as exc:
+                error = exc
+                continue
+            if parsed is not None:
+                return parsed
+        if error is not None:
+            raise error
+        return None
+
+    @staticmethod
+    def _kkgif_ffmpeg_trim_args(
+        source_path: str,
+        *,
+        start: float | None,
+        end: float | None,
+        fallback_duration: float,
+    ) -> list[str]:
+        if start is None or end is None:
+            return ["-i", source_path, "-t", f"{fallback_duration:.3f}"]
+        length = max(0.0, end - start)
+        if start <= 0.001:
+            return ["-i", source_path, "-t", f"{length:.3f}"]
+        coarse = max(0.0, start - 1.0)
+        fine = start - coarse
+        return [
+            "-ss",
+            f"{coarse:.3f}",
+            "-i",
+            source_path,
+            "-ss",
+            f"{fine:.3f}",
+            "-t",
+            f"{length:.3f}",
+        ]
+
+    @filter.regex(_KKGIF_CLIP_WAKE_RE)
+    async def handle_kkgif_clip(self, event: AstrMessageEvent):
+        """粘连时间区间或帮助，例如 /kkgif[3,8.5]、/kkgif帮助。"""
+        if self._kkgif_command_filter_matches(event.get_message_str() or ""):
+            return
+        async for result in self.handle_kkgif(event, ""):
+            yield result
+
     @filter.command("kkgif")
     async def handle_kkgif(self, event: AstrMessageEvent, prompt: GreedyStr = ""):
         """把一个附带或引用的视频在本地转换为优化后的 GIF，不调用模型。"""
@@ -3450,13 +3737,16 @@ class KktImagePlugin(Star, KktWebApiMixin):
         prompt = self._extract_prompt(
             event, prompt, self._command_names_for_parser()
         )
-        if self._is_help_token(prompt) or str(prompt or "").strip().lower() in {"help", "帮助", "?"}:
-            yield event.plain_result(
-                "康康视频转 GIF\n用法：引用或附带一个视频后发送 /kkgif\n"
-                "限制：仅支持一个视频，最长 16 秒，输出不含声音。\n"
-                "压缩请用 /kkgifzip 或 /gifz（可带 1-5 档）。"
-            )
+        if self._kkgif_is_help(event, prompt):
+            yield event.plain_result(self._kkgif_help_text())
             return
+        try:
+            clip = self._kkgif_clip_from_event(event, str(prompt or ""))
+        except ValueError as exc:
+            yield event.plain_result(str(exc))
+            return
+        if clip:
+            logger.info("[kkt] kkgif 时间区间: start=%s end=%s", clip[0], clip[1])
 
         try:
             videos = await self._collect_videos(event)
@@ -3467,7 +3757,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
         if not videos:
             yield event.plain_result(
                 "请附带或回复一个视频后再发送 /kkgif。\n"
-                "限制：仅支持一个视频，最长 16 秒。"
+                "截取：/kkgif[3,8.5]、/kkgif[,3.8]（开头到 3.8 秒）、"
+                "/kkgif[3.8,]（到结尾）。\n"
+                f"限制：仅支持一个视频，整段或片段最长 {self.video_gif_max_duration} 秒。"
             )
             return
         if len(videos) > 1:
@@ -3475,18 +3767,27 @@ class KktImagePlugin(Star, KktWebApiMixin):
             yield event.plain_result("每次只能转换一个视频为 GIF，请只保留一个视频。")
             return
 
+        clip_label = ""
+        if clip:
+            left = "" if clip[0] is None else f"{clip[0]:g}"
+            right = "" if clip[1] is None else f"{clip[1]:g}"
+            clip_label = f"{left},{right}"
         task_id = self._start_task_log(
-            channel="gif", command="kkgif", prompt="", model="ffmpeg-gif"
+            channel="gif", command="kkgif", prompt=clip_label, model="ffmpeg-gif"
         )
         source_path = ""
         output_path = ""
         try:
             source_path = await videos[0].convert_to_file_path()
-            await event.send(
-                event.plain_result("喵～正在把视频压成 GIF，马上就好啦。")
-            )
+            if clip:
+                notice = f"喵～正在把{self._kkgif_clip_span(clip)}的片段压成 GIF，马上就好啦。"
+            else:
+                notice = "喵～正在把视频压成 GIF，马上就好啦。"
+            await event.send(event.plain_result(notice))
             output_path, duration, dimension, fps = await self._convert_video_to_gif(
-                source_path
+                source_path,
+                start=None if clip is None else clip[0],
+                end=None if clip is None else clip[1],
             )
             self._finish_task_log(
                 task_id,
@@ -3495,27 +3796,50 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 progress=100,
             )
             logger.info(
-                "[kkt] kkgif 转换成功: source=%s output=%s duration=%.2fs dimension=%d fps=%d",
+                "[kkt] kkgif 转换成功: source=%s output=%s duration=%.2fs dimension=%d fps=%d clip=%s",
                 source_path,
                 output_path,
                 duration,
                 dimension,
                 fps,
+                self._kkgif_clip_span(clip) if clip else "-",
             )
             try:
                 image = Comp.Image.fromFileSystem(str(Path(output_path).resolve()))
             except Exception:
                 image = Comp.Image(file=str(Path(output_path).resolve()), path=output_path)
             await event.send(MessageChain([image]))
-            await event.send(event.plain_result("GIF 生成成功，喵～"))
+            done = "GIF 生成成功，喵～"
+            if clip:
+                done = f"GIF 生成成功（{self._kkgif_clip_span(clip)}），喵～"
+            await event.send(event.plain_result(done))
         except Exception as exc:
             logger.exception("[kkt] kkgif 转换失败: %s", exc)
-            code = "video_too_long" if "16 秒" in str(exc) else type(exc).__name__
-            self._finish_task_log(task_id, status="failed", code=code, progress=0)
-            if "16 秒" in str(exc):
-                yield event.plain_result("视频超过 16 秒，无法转换为 GIF。")
+            text_exc = str(exc)
+            limit = self.video_gif_max_duration
+            if "片段超过" in text_exc:
+                code = "clip_too_long"
+                reply = f"截取片段超过 {limit} 秒，无法转换为 GIF。"
+            elif "视频超过" in text_exc:
+                code = "video_too_long"
+                reply = (
+                    f"视频超过 {limit} 秒，无法整段转换为 GIF。\n"
+                    "可改用 /kkgif[3,8.5]、/kkgif[,3.8] 或 /kkgif[3.8,] "
+                    f"截取不超过 {limit} 秒的片段。"
+                )
+            elif (
+                "超出视频" in text_exc
+                or "片段太短" in text_exc
+                or text_exc.startswith("开始时间")
+                or text_exc.startswith("结束时间")
+            ):
+                code = "clip_out_of_range"
+                reply = text_exc
             else:
-                yield event.plain_result("GIF 转换失败，请确认视频格式和时长后重试。")
+                code = type(exc).__name__
+                reply = "GIF 转换失败，请确认视频格式和时长后重试。"
+            self._finish_task_log(task_id, status="failed", code=code, progress=0)
+            yield event.plain_result(reply)
         finally:
             if output_path:
                 try:
@@ -3887,11 +4211,51 @@ class KktImagePlugin(Star, KktWebApiMixin):
         return duration
 
     async def _convert_video_to_gif(
-        self, source_path: str
+        self,
+        source_path: str,
+        *,
+        start: float | None = None,
+        end: float | None = None,
     ) -> tuple[str, float, int, int]:
         duration = await self._probe_video_duration(source_path)
-        if duration > self.video_gif_max_duration + 0.05:
-            raise RuntimeError("视频超过 16 秒")
+        has_clip = start is not None or end is not None
+        if has_clip:
+            clip_start = 0.0 if start is None else float(start)
+            clip_end = float(duration if end is None else end)
+            if clip_start >= duration:
+                raise RuntimeError(f"开始时间超出视频长度（共 {duration:.1f} 秒）")
+            if end is not None and clip_end > duration + 0.25:
+                raise RuntimeError(f"结束时间超出视频长度（共 {duration:.1f} 秒）")
+            clip_end = min(clip_end, duration)
+            clip_len = clip_end - clip_start
+            if clip_len < 0.2:
+                raise RuntimeError("片段太短")
+            if clip_len > self.video_gif_max_duration + 0.05:
+                raise RuntimeError("片段超过 16 秒")
+            reported = clip_len
+            logger.info(
+                "[kkt] kkgif 截取生效: start=%.2f end=%.2f length=%.2fs source=%.2fs",
+                clip_start,
+                clip_end,
+                clip_len,
+                duration,
+            )
+            time_args = self._kkgif_ffmpeg_trim_args(
+                source_path,
+                start=clip_start,
+                end=clip_end,
+                fallback_duration=clip_len,
+            )
+        else:
+            if duration > self.video_gif_max_duration + 0.05:
+                raise RuntimeError("视频超过 16 秒")
+            reported = duration
+            time_args = [
+                "-i",
+                source_path,
+                "-t",
+                str(min(duration, float(self.video_gif_max_duration))),
+            ]
         dimensions = []
         for value in (self.video_gif_max_dimension, 360, 256):
             if value not in dimensions:
@@ -3913,10 +4277,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 "-hide_banner",
                 "-loglevel",
                 "error",
-                "-i",
-                source_path,
-                "-t",
-                str(min(duration, float(self.video_gif_max_duration))),
+                *time_args,
                 "-filter_complex",
                 filter_graph,
                 "-an",
@@ -3946,7 +4307,7 @@ class KktImagePlugin(Star, KktWebApiMixin):
                     )
                     output_path.unlink(missing_ok=True)
                     continue
-                return str(output_path), duration, dimension, fps
+                return str(output_path), reported, dimension, fps
             except asyncio.TimeoutError:
                 output_path.unlink(missing_ok=True)
                 last_error = "ffmpeg timeout"
@@ -5745,6 +6106,11 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 item
             )
 
+        try:
+            self_id = str(event.get_self_id() or "").strip()
+        except Exception:
+            self_id = ""
+
         current_images: list = []
         quoted_images: list = []
         for component in event.get_messages():
@@ -5756,10 +6122,9 @@ class KktImagePlugin(Star, KktWebApiMixin):
                 for quoted in component.chain or []:
                     if isinstance(quoted, Comp.Image):
                         quoted_images.append(quoted)
-                    elif isinstance(quoted, Comp.Plain):
-                        text = getattr(quoted, "text", "").strip()
-                        if text:
-                            quoted_texts.append(text)
+                quoted_texts.extend(
+                    self._quoted_texts_from_reply(component, self_id=self_id)
+                )
 
         for component in quoted_images:
             await add_image(component, source="quote")
@@ -5769,10 +6134,6 @@ class KktImagePlugin(Star, KktWebApiMixin):
         # enable_at_avatar：全部 @ 头像，可与引用图/当前图合并
         if self.enable_at_avatar:
             seen_qq: set[str] = set()
-            try:
-                self_id = str(event.get_self_id() or "").strip()
-            except Exception:
-                self_id = ""
             for component in event.get_messages():
                 if not isinstance(component, Comp.At):
                     continue

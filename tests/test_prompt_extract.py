@@ -73,6 +73,12 @@ def _install_stubs() -> None:
 
             return deco
 
+        def regex(self, *a, **k):
+            def deco(fn):
+                return fn
+
+            return deco
+
     class MessageChain:
         def __init__(self, chain=None, **_):
             self.chain = chain or []
@@ -108,6 +114,8 @@ def _install_stubs() -> None:
         def __init__(self, chain=None, id=None, **kwargs):
             self.chain = chain or []
             self.id = id if id is not None else kwargs.get("id")
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
     class Video:
         def __init__(self, file=None, path=None, url=None, **kwargs):
@@ -292,7 +300,7 @@ def test_resolve_api_credentials_image2_requires_own_key():
     grok_base, grok_keys, grok_model = plugin._resolve_api_credentials("grok")
     assert grok_base == "https://example.com/v1"
     assert grok_keys == ["default-key"]
-    assert grok_model == "grok-imagine-image-quality"
+    assert grok_model == "grok-imagine-image-lite"
 
 
 def test_strip_at_tokens():
@@ -346,6 +354,51 @@ def test_extract_prompt_at_only_returns_empty():
         message_str="/kkt @某人(1)",
     )
     assert Plugin._extract_prompt(event, "@某人(1)") == ""
+
+
+def test_sanitize_quoted_prompt_drops_bot_status_only():
+    assert Plugin._sanitize_quoted_prompt("生成耗时：13秒，请查收喵") == ""
+    assert Plugin._sanitize_quoted_prompt("生成耗时: 12 秒, 请查收喵") == ""
+    assert Plugin._sanitize_quoted_prompt("视频生成成功，耗时：8秒，请查收喵") == ""
+    assert (
+        Plugin._sanitize_quoted_prompt("一只橘猫\n生成耗时：3秒，请查收喵") == "一只橘猫"
+    )
+    kept = "请在画面上写生成耗时：13秒，请查收喵"
+    assert Plugin._sanitize_quoted_prompt(kept) == kept
+
+
+def test_quoted_texts_ignore_bot_own_image_caption():
+    reply = Comp.Reply(
+        id=1,
+        chain=[
+            Comp.Plain("生成耗时：13秒，请查收喵"),
+            Comp.Image(file="a.jpg"),
+        ],
+        sender_id="1748446534",
+    )
+    assert Plugin._quoted_texts_from_reply(reply, self_id="1748446534") == []
+
+
+def test_quoted_texts_keep_human_caption():
+    reply = Comp.Reply(
+        id=2,
+        chain=[Comp.Plain("三视图，白底")],
+        sender_id="1487113634",
+    )
+    assert Plugin._quoted_texts_from_reply(reply, self_id="1748446534") == [
+        "三视图，白底"
+    ]
+
+
+def test_quoted_texts_strip_status_when_sender_unknown():
+    reply = Comp.Reply(
+        id=3,
+        chain=[
+            Comp.Plain("生成耗时：13秒，请查收喵"),
+            Comp.Plain("改成夜景"),
+        ],
+    )
+    assert Plugin._quoted_texts_from_reply(reply, self_id="") == ["改成夜景"]
 
 
 def test_extract_prompt_image_plus_text_plain():
@@ -1261,3 +1314,103 @@ def test_workflow_aliases_and_still_prompt():
     assert "视频首帧" in still and "猫在雨中奔跑" in still
     assert "分镜" in still or "单张" in still
     assert "画质" in still or "高清" in still
+
+def test_kkgif_clip_range_parser_and_help():
+    plugin = object.__new__(Plugin)
+    plugin.video_gif_max_duration = 16
+    assert plugin._parse_kkgif_clip_text("kkgif") is None
+    assert plugin._parse_kkgif_clip_text("/kkgif") is None
+    assert plugin._parse_kkgif_clip_text("/kkgif 帮助") is None
+    assert plugin._parse_kkgif_clip_text("kkgifzip") is None
+    assert plugin._parse_kkgif_clip_text("/kkgifzip3") is None
+    samples = {
+        "kkgif[3,8.5]": (3.0, 8.5),
+        "kkgif[3，8.5]": (3.0, 8.5),
+        "/kkgif(3,8.5)": (3.0, 8.5),
+        "kkgif(3，8.5)": (3.0, 8.5),
+        "kkgif（3，8.5）": (3.0, 8.5),
+        "kkgif【3,8.5】": (3.0, 8.5),
+        "kkgif［3，8.5］": (3.0, 8.5),
+        "kkgif[ 3 , 8.5 ]": (3.0, 8.5),
+        "/kkgif [3,8.5]": (3.0, 8.5),
+        "kkgif[３，８．５]": (3.0, 8.5),
+        "kkgif[,3.8]": (None, 3.8),
+        "kkgif(，3.8)": (None, 3.8),
+        "kkgif（，3.8）": (None, 3.8),
+        "kkgif【，3.8】": (None, 3.8),
+        "kkgif[3.8,]": (3.8, None),
+        "kkgif(3.8,)": (3.8, None),
+        "kkgif(3.8，)": (3.8, None),
+        "kkgif【3.8，】": (3.8, None),
+        "[,3.8]": (None, 3.8),
+        "[3.8,]": (3.8, None),
+    }
+    for text, expected in samples.items():
+        assert plugin._parse_kkgif_clip_text(text) == expected, text
+    for bad in (
+        "kkgif[3]",
+        "kkgif[,]",
+        "kkgif[8,3]",
+        "kkgif[3,8.5)",
+        "kkgif[,20]",
+        "kkgif[0,20]",
+        "kkgif[3,8.5]x",
+    ):
+        try:
+            plugin._parse_kkgif_clip_text(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+    assert plugin._kkgif_clip_from_event(FakeEvent([], "kkgif[,3.8]"), "") == (None, 3.8)
+    assert plugin._kkgif_clip_from_event(FakeEvent([], "/kkgif[3.8,]"), "") == (3.8, None)
+    args = Plugin._kkgif_ffmpeg_trim_args(
+        "/tmp/a.mp4", start=3, end=8.5, fallback_duration=5.5
+    )
+    assert args[:4] == ["-ss", "2.000", "-i", "/tmp/a.mp4"]
+    assert args[4:8] == ["-ss", "1.000", "-t", "5.500"]
+    head = Plugin._kkgif_ffmpeg_trim_args(
+        "/tmp/a.mp4", start=0, end=3.8, fallback_duration=3.8
+    )
+    assert head == ["-i", "/tmp/a.mp4", "-t", "3.800"]
+    assert Plugin._kkgif_command_filter_matches("kkgif [3,8.5]")
+    assert Plugin._kkgif_command_filter_matches("/kkgif")
+    assert not Plugin._kkgif_command_filter_matches("kkgif[3,8.5]")
+    assert not Plugin._kkgif_command_filter_matches("kkgif[,3.8]")
+    assert not Plugin._kkgif_command_filter_matches("kkgif[3.8,]")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgif[3,8.5]")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgif[,3.8]")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgif[3.8,]")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgif（，3.8）")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("/kkgif【3.8，】")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgif [3,8.5]")
+    assert not kkt._KKGIF_CLIP_WAKE_RE.search("kkgif")
+    assert not kkt._KKGIF_CLIP_WAKE_RE.search("kkgifzip")
+    assert not kkt._KKGIF_CLIP_WAKE_RE.search("/kkgifzip5")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgif帮助")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("/kkgif帮助")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgifhelp")
+    assert kkt._KKGIF_CLIP_WAKE_RE.search("kkgif?")
+    assert not kkt._KKGIF_CLIP_WAKE_RE.search("kkgif帮助啊")
+    assert not kkt._KKGIF_CLIP_WAKE_RE.search("kkgif 帮助")
+    assert plugin._parse_kkgif_clip_text("kkgif帮助") is None
+    assert Plugin._kkgif_text_is_glued_help("kkgif帮助")
+    assert Plugin._kkgif_text_is_glued_help("/kkgif帮助")
+    assert Plugin._kkgif_text_is_glued_help("kkgifhelp")
+    assert Plugin._kkgif_text_is_glued_help("kkgif?")
+    assert not Plugin._kkgif_text_is_glued_help("kkgif 帮助")
+    assert not Plugin._kkgif_command_filter_matches("kkgif帮助")
+    assert plugin._kkgif_is_help(FakeEvent([], "kkgif帮助"), "")
+    assert plugin._kkgif_is_help(FakeEvent([], "/kkgif 帮助"), "帮助")
+    help_text = plugin._kkgif_help_text()
+    assert "kkgif帮助" in help_text
+    assert "/kkgif[3,8.5]" in help_text
+    assert "/kkgif[,3.8]" in help_text
+    assert "/kkgif[3.8,]" in help_text
+    assert "（）" in help_text and "【】" in help_text
+    assert "，" in help_text
+    basic = kkt.build_basic_help_text()
+    gif_help = kkt.build_gif_help_text()
+    for blob in (basic, gif_help):
+        assert "kkgif[3,8.5]" in blob
+        assert "[,3.8]" in blob
+        assert "[3.8,]" in blob

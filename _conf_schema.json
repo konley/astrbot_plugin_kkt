@@ -185,6 +185,12 @@
     "description": "Grok 生图通道（/grok）",
     "type": "object",
     "items": {
+      "grok_image_model": {
+        "description": "Grok 生图模型",
+        "type": "string",
+        "default": "grok-imagine-image-lite",
+        "hint": "生图/编辑使用的模型名，如 grok-imagine-image-lite、grok-imagine-image-quality。"
+      },
       "grok_api_base": {
         "description": "Grok API 基址",
         "type": "string",
